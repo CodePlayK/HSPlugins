@@ -2673,20 +2673,47 @@ namespace Timeline
                                 {
                                     if (_selectedKeyframesXOffset.Count == 0)
                                         return;
+
+                                    Dictionary<Keyframe, float> moves = new Dictionary<Keyframe, float>();
                                     foreach (KeyValuePair<KeyframeDisplay, float> pair in _selectedKeyframesXOffset)
                                     {
                                         RectTransform rt = ((RectTransform)pair.Key.gameObject.transform);
-                                        float time = 10f * rt.anchoredPosition.x / (_baseGridWidth * _zoomLevel);
-                                        MoveKeyframe(pair.Key.keyframe, time);
+                                        moves[pair.Key.keyframe] = 10f * rt.anchoredPosition.x / (_baseGridWidth * _zoomLevel);
+                                    }
 
-                                        int index = _selectedKeyframes.FindIndex(k => k.Value == pair.Key.keyframe);
-                                        if (index != -1)
-                                            _selectedKeyframes[index] = new KeyValuePair<float, Keyframe>(time, pair.Key.keyframe);
+                                    int blocked = 0;
+                                    foreach (KeyValuePair<Keyframe, float> move in moves)
+                                    {
+                                        Keyframe occupant = FindOccupant(move.Key.parent, move.Value, move.Key);
+                                        if (occupant != null && !moves.ContainsKey(occupant))
+                                            ++blocked;
+                                    }
+
+                                    if (blocked > 0)
+                                    {
+                                        Logger.LogMessage("Move blocked: " + blocked + " keyframe(s) would overlap existing keyframes");
+                                    }
+                                    else
+                                    {
+                                        List<KeyValuePair<Keyframe, float>> ordered = new List<KeyValuePair<Keyframe, float>>(moves);
+                                        Keyframe reference = ordered[0].Key;
+                                        float referenceOldTime = reference.parent.keyframes.Keys[reference.parent.keyframes.IndexOfValue(reference)];
+                                        bool forward = ordered[0].Value >= referenceOldTime;
+                                        ordered.Sort((a, b) => forward ? b.Value.CompareTo(a.Value) : a.Value.CompareTo(b.Value));
+
+                                        foreach (KeyValuePair<Keyframe, float> move in ordered)
+                                        {
+                                            if (!TryMoveKeyframe(move.Key, move.Value))
+                                            {
+                                                Logger.LogError("Move to " + move.Value + " failed despite passing the collision precheck");
+                                            }
+                                        }
                                     }
 
                                     e.Reset();
-                                    UpdateKeyframeWindow(false);
                                     _selectedKeyframesXOffset.Clear();
+                                    UpdateGrid();
+                                    UpdateKeyframeWindow(false);
                                 };
 
                                 _displayedKeyframes.Add(display);
@@ -2788,7 +2815,7 @@ namespace Timeline
                 foreach (KeyValuePair<float, Keyframe> pair in _selectedKeyframes)
                 {
                     float newTime = (float)(((pair.Key - min) * newSize) / currentSize + min);
-                    if (pair.Value.parent.keyframes.TryGetValue(newTime, out Keyframe otherKeyframe) && otherKeyframe != pair.Value)
+                    if (FindOccupant(pair.Value.parent, newTime, pair.Value) != null)
                     {
                         conflicting = true;
                         ++multiplier;
@@ -2803,8 +2830,11 @@ namespace Timeline
             {
                 KeyValuePair<float, Keyframe> pair = _selectedKeyframes[i];
                 float newTime = (float)(((pair.Key - min) * newSize) / currentSize + min);
-                MoveKeyframe(pair.Value, newTime);
-                _selectedKeyframes[i] = new KeyValuePair<float, Keyframe>(newTime, pair.Value);
+
+                if (!TryMoveKeyframe(pair.Value, newTime))
+                {
+                    Logger.LogError("Scale to " + newTime + " failed despite passing the collision precheck");
+                }
             }
             UpdateKeyframeWindow(false);
             UpdateGrid();
@@ -2878,6 +2908,11 @@ namespace Timeline
 
         private void AddKeyframe(Interpolable interpolable, float time)
         {
+            if (FindOccupant(interpolable, time, null) != null)
+            {
+                Logger.LogMessage("A keyframe already exists at " + time);
+                return;
+            }
             try
             {
                 Keyframe keyframe;
@@ -2929,8 +2964,8 @@ namespace Timeline
                 {
                     foreach (KeyValuePair<float, Keyframe> pair in @group.Key.keyframes.Reverse())
                     {
-                        if (pair.Key >= time)
-                            MoveKeyframe(pair.Value, (float)(pair.Key + duration));
+                        if (pair.Key >= time && !TryMoveKeyframe(pair.Value, (float)(pair.Key + duration)))
+                            Logger.LogMessage("Couldn't make room at " + pair.Key + ": another keyframe already exists at " + (pair.Key + duration));
                     }
                 }
             }
@@ -2948,14 +2983,37 @@ namespace Timeline
             UpdateGrid();
         }
 
-        private void MoveKeyframe(Keyframe keyframe, float destinationTime)
+        // Destination times come from pixel round-trips, so a keyframe aimed exactly at another's
+        // time can land ~2e-7 off. An exact SortedList lookup misses that and lets a near-duplicate
+        // through, which is the collision this is meant to catch.
+        private static Keyframe FindOccupant(Interpolable interpolable, float time, Keyframe self)
         {
-            Logger.LogError(keyframe.parent.keyframes.IndexOfValue(keyframe));
-            keyframe.parent.keyframes.RemoveAt(keyframe.parent.keyframes.IndexOfValue(keyframe));
-            keyframe.parent.keyframes.Add(destinationTime, keyframe);
+            SortedList<float, Keyframe> keyframes = interpolable.keyframes;
+            for (int i = 0; i < keyframes.Count; i++)
+            {
+                if (!Mathf.Approximately(keyframes.Keys[i], time))
+                    continue;
+                Keyframe candidate = keyframes.Values[i];
+                if (candidate != self)
+                    return candidate;
+            }
+            return null;
+        }
+
+        private bool TryMoveKeyframe(Keyframe keyframe, float destinationTime)
+        {
+            SortedList<float, Keyframe> keyframes = keyframe.parent.keyframes;
+            if (FindOccupant(keyframe.parent, destinationTime, keyframe) != null)
+                return false; // slot held by another keyframe: don't remove, don't orphan
+            int index = keyframes.IndexOfValue(keyframe);
+            if (index < 0)
+                return false;
+            keyframes.RemoveAt(index);
+            keyframes.Add(destinationTime, keyframe);
             int i = _selectedKeyframes.FindIndex(k => k.Value == keyframe);
             if (i != -1)
                 _selectedKeyframes[i] = new KeyValuePair<float, Keyframe>(destinationTime, keyframe);
+            return true;
         }
 
         private void OnGridTopMouse(PointerEventData eventData)
@@ -3618,42 +3676,48 @@ namespace Timeline
 
         private void DeleteKeyframes(IEnumerable<KeyValuePair<float, Keyframe>> keyframes, bool removeInterpolables = true)
         {
-            float min = float.PositiveInfinity;
-            float max = float.NegativeInfinity;
             keyframes = keyframes.ToList();
+            Dictionary<Interpolable, float> deletedMin = new Dictionary<Interpolable, float>();
+            Dictionary<Interpolable, float> deletedMax = new Dictionary<Interpolable, float>();
             foreach (KeyValuePair<float, Keyframe> pair in keyframes)
             {
                 if (pair.Value == null) //Just a safeguard.
                     continue;
-                if (pair.Key < min)
-                    min = pair.Key;
-                if (pair.Key > max)
-                    max = pair.Key;
+                Interpolable parent = pair.Value.parent;
+                if (!deletedMin.TryGetValue(parent, out float pMin) || pair.Key < pMin)
+                    deletedMin[parent] = pair.Key;
+                if (!deletedMax.TryGetValue(parent, out float pMax) || pair.Key > pMax)
+                    deletedMax[parent] = pair.Key;
                 try
                 {
-                    pair.Value.parent.keyframes.Remove(pair.Key);
-                    if (removeInterpolables && pair.Value.parent.keyframes.Count == 0)
-                        RemoveInterpolable(pair.Value.parent);
+                    parent.keyframes.Remove(pair.Key);
+                    if (removeInterpolables && parent.keyframes.Count == 0)
+                        RemoveInterpolable(parent);
                 }
                 catch (Exception e)
                 {
-                    Logger.LogError("Couldn't delete keyframe with time \"" + pair.Key + "\" and value \"" + pair.Value + "\" from interpolable \"" + pair.Value.parent + "\"\n" + e);
+                    Logger.LogError("Couldn't delete keyframe with time \"" + pair.Key + "\" and value \"" + pair.Value + "\" from interpolable \"" + parent + "\"\n" + e);
                 }
             }
 
             if (Input.GetKey(KeyCode.LeftAlt))
             {
-                double duration = max - min + (_blockLength / _divisions);
-                //IDK, grouping didn't work so I'm doing it like this
-                HashSet<Interpolable> processedParents = new HashSet<Interpolable>();
-                foreach (KeyValuePair<float, Keyframe> k in keyframes)
+                float step = _blockLength / _divisions;
+                foreach (Interpolable parent in deletedMin.Keys)
                 {
-                    if (processedParents.Contains(k.Value.parent) != false)
-                        continue;
-                    processedParents.Add(k.Value.parent);
-                    foreach (KeyValuePair<float, Keyframe> pair in k.Value.parent.keyframes.ToList())
-                        if (pair.Key > min)
-                            MoveKeyframe(pair.Value, (float)(pair.Key - duration));
+                    float parentMin = deletedMin[parent];
+                    // Spans a non-contiguous selection as one block, so the shift can overshoot past zero.
+                    double duration = deletedMax[parent] - parentMin + step;
+                    foreach (KeyValuePair<float, Keyframe> pair in parent.keyframes.ToList())
+                    {
+                        if (pair.Key <= parentMin)
+                            continue;
+                        float newTime = (float)(pair.Key - duration);
+                        if (newTime < 0f)
+                            Logger.LogMessage("Couldn't close gap at " + pair.Key + ": " + newTime + " is before the start of the timeline");
+                        else if (!TryMoveKeyframe(pair.Value, newTime))
+                            Logger.LogMessage("Couldn't close gap at " + pair.Key + ": another keyframe already exists at " + newTime);
+                    }
                 }
             }
             _selectedKeyframes.RemoveAll(elem => elem.Value == null || keyframes.Any(k => k.Value == elem.Value));
