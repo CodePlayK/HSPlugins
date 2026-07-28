@@ -1148,22 +1148,16 @@ namespace VideoExport
                 _recordingFrameLimit = -1;
             }
 
-            if (_selectedLimitDuration == LimitDurationType.Timeline)
+            if (_selectedLimitDuration == LimitDurationType.Timeline && _realignTimeline)
             {
-                if (_realignTimeline)
-                {
-                    TimelineCompatibility.Stop();
-                    TimelineCompatibility.Play();
+                TimelineCompatibility.Stop();
+                TimelineCompatibility.Play();
+                yield return new WaitForEndOfFrame();
+                TimelineCompatibility.Stop();
+
+                // Wait for dynamic bones and other physics to settle
+                for (int x = 0; x < _fps; x++)
                     yield return new WaitForEndOfFrame();
-                    TimelineCompatibility.Stop();
-
-                    // Wait for dynamic bones and other physics to settle
-                    for (int x = 0; x < _fps; x++)
-                        yield return new WaitForEndOfFrame();
-                }
-
-                if (TimelineCompatibility.GetIsPlaying() == false)
-                    TimelineCompatibility.Play();
             }
 
             ParallelScreenshotEncoder parallelEncoder = null;
@@ -1319,6 +1313,12 @@ namespace VideoExport
                     }
                 )
             );
+
+            yield return new WaitForEndOfFrame();
+
+            // Must start after the wait above, otherwise the timeline runs a frame ahead of the first capture.
+            if (_selectedLimitDuration == LimitDurationType.Timeline && TimelineCompatibility.GetIsPlaying() == false)
+                TimelineCompatibility.Play();
 
             int generatedFrames = 0;
             for (; ; i++)
