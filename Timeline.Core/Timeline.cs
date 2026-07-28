@@ -4137,6 +4137,14 @@ namespace Timeline
             {
                 Stop();
             }
+            else
+            {
+                // A scene card restores the pose of whatever frame it was saved at, and interpolation is
+                // skipped while paused, so without this the scene sits on one frame and the cursor on another.
+                UpdateCursor();
+                Interpolate(true);
+                Interpolate(false);
+            }
         }
 
         private void LoadSingle(string path)
