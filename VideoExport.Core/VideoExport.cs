@@ -48,7 +48,7 @@ namespace VideoExport
 #endif
     public partial class VideoExport : GenericPlugin
     {
-        public const string Version = "2.1";
+        public const string Version = "2.1.1";
         public const string GUID = "com.joan6694.illusionplugins.videoexport";
         public const string Name = "VideoExport";
 
