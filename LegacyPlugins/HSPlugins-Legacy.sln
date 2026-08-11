@@ -33,9 +33,9 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PoseViewer", "PoseViewer\Po
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MoreAccessoriesAI", "MoreAccessoriesAI\MoreAccessoriesAI.csproj", "{7C8D61BF-6F2F-4BF8-A82C-9893ECA1E6F8}"
 EndProject
-Project("{D954291E-2A0B-460D-934E-DC6B0785DB48}") = "UIUtility", "UIUtility\UIUtility.shproj", "{074E95D7-3B9A-4CD9-B1B6-6F7273D400A4}"
+Project("{D954291E-2A0B-460D-934E-DC6B0785DB48}") = "UIUtility", "..\UIUtility\UIUtility.shproj", "{074E95D7-3B9A-4CD9-B1B6-6F7273D400A4}"
 EndProject
-Project("{D954291E-2A0B-460D-934E-DC6B0785DB48}") = "ToolBox", "ToolBox\ToolBox.shproj", "{34A5E7CE-5612-4FEE-8290-2C4290363A40}"
+Project("{D954291E-2A0B-460D-934E-DC6B0785DB48}") = "ToolBox", "..\ToolBox\ToolBox.shproj", "{34A5E7CE-5612-4FEE-8290-2C4290363A40}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "_Needs work", "_Needs work", "{A10412DF-AF85-43AA-82D2-424DC3023104}"
 EndProject
@@ -248,8 +248,8 @@ Global
 		SolutionGuid = {A138173C-ADED-4DEF-AE9B-B4B1F5CF0298}
 	EndGlobalSection
 	GlobalSection(SharedMSBuildProjectFiles) = preSolution
-		UIUtility\UIUtility.projitems*{074e95d7-3b9a-4cd9-b1b6-6f7273d400a4}*SharedItemsImports = 13
-		ToolBox\ToolBox.projitems*{34a5e7ce-5612-4fee-8290-2c4290363a40}*SharedItemsImports = 13
+		..\UIUtility\UIUtility.projitems*{074e95d7-3b9a-4cd9-b1b6-6f7273d400a4}*SharedItemsImports = 13
+		..\ToolBox\ToolBox.projitems*{34a5e7ce-5612-4fee-8290-2c4290363a40}*SharedItemsImports = 13
 	EndGlobalSection
 	GlobalSection(Performance) = preSolution
 		HasPerformanceSessions = true
