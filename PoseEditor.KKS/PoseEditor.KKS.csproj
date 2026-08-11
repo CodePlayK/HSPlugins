@@ -3,7 +3,7 @@
 		<TargetFramework>net46</TargetFramework>
 		<OutputType>Library</OutputType>
 		<RootNamespace>HSPE</RootNamespace>
-		<AssemblyName>HS2PE</AssemblyName>
+		<AssemblyName>KKSPE</AssemblyName>
 	</PropertyGroup>
 	<ItemGroup>
 		<None Update="Joan6694DynamicBoneColliders.zipmod">
@@ -11,9 +11,9 @@
 		</None>
 	</ItemGroup>
 	<ItemGroup>
-		<PackageReference Include="IllusionModdingAPI.HS2API" Version="1.43.0" />
+		<PackageReference Include="IllusionModdingAPI.KKSAPI" Version="1.43.0" />
 	</ItemGroup>
-	<Import Project="..\Core.PoseEditor\Core.PoseEditor.projitems" Label="Shared" />
+	<Import Project="..\PoseEditor.Core\Core.PoseEditor.projitems" Label="Shared" />
 	<Import Project="..\ToolBox\ToolBox.projitems" Label="Shared" />
 	<Import Project="..\UIUtility\UIUtility.projitems" Label="Shared" />
 </Project>

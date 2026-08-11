@@ -1,9 +1,9 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 	<PropertyGroup>
-		<TargetFramework>net35</TargetFramework>
+		<TargetFramework>net46</TargetFramework>
 		<OutputType>Library</OutputType>
 		<RootNamespace>HSPE</RootNamespace>
-		<AssemblyName>KKPE</AssemblyName>
+		<AssemblyName>AIPE</AssemblyName>
 	</PropertyGroup>
 	<ItemGroup>
 		<None Update="Joan6694DynamicBoneColliders.zipmod">
@@ -11,9 +11,9 @@
 		</None>
 	</ItemGroup>
 	<ItemGroup>
-		<PackageReference Include="IllusionModdingAPI.KKAPI" Version="1.43.0" />
+		<PackageReference Include="IllusionModdingAPI.AIAPI" Version="1.43.0" />
 	</ItemGroup>
-	<Import Project="..\Core.PoseEditor\Core.PoseEditor.projitems" Label="Shared" />
+	<Import Project="..\PoseEditor.Core\Core.PoseEditor.projitems" Label="Shared" />
 	<Import Project="..\ToolBox\ToolBox.projitems" Label="Shared" />
 	<Import Project="..\UIUtility\UIUtility.projitems" Label="Shared" />
 </Project>
