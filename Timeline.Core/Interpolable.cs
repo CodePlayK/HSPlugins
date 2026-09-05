@@ -1,10 +1,29 @@
-﻿using Studio;
+using Studio;
 using System.Collections.Generic;
 using System.Xml;
 using UnityEngine;
 
 namespace Timeline
 {
+    public enum LoopEnterCondition
+    {
+        Always = 0,
+        Manual = 1
+    }
+
+    public enum LoopExitCondition
+    {
+        Never = 0,
+        AfterMaxLoops = 1,
+        AtLoopEndOnce = 2
+    }
+
+    public enum LoopExitBehavior
+    {
+        ContinueGlobalTime = 0,
+        HoldLastValue = 1
+    }
+
     public class Interpolable : InterpolableModel
     {
         private readonly int _hashCode;
@@ -16,6 +35,22 @@ namespace Timeline
         public bool enabled = true;
         public Color color = Color.white;
         public string alias = "";
+
+        // === Loop support (phase 1) ===
+        public bool loopEnabled = false;
+        public float loopStart = 0f;
+        public float loopEnd = 0f;
+        public int maxLoops = -1; // -1 = infinite
+        public LoopEnterCondition enterCondition = LoopEnterCondition.Always;
+        public LoopExitCondition exitCondition = LoopExitCondition.Never;
+        public LoopExitBehavior exitBehavior = LoopExitBehavior.ContinueGlobalTime;
+
+        // Runtime state (not serialized)
+        [System.NonSerialized] public bool isInLoop = false;
+        [System.NonSerialized] public float loopEnterGlobalTime = 0f;
+        [System.NonSerialized] public int currentLoopCount = 0;
+        [System.NonSerialized] public bool holdAfterExit = false;
+        [System.NonSerialized] public float heldTime = 0f;
 
         public Interpolable(ObjectCtrlInfo oci, InterpolableModel interpolableModel) : base(interpolableModel.GetParameter(oci), interpolableModel)
         {
@@ -39,6 +74,15 @@ namespace Timeline
                 int hash = base.GetHashCode();
                 _hashCode = hash * 31 + (this.oci != null ? this.oci.GetHashCode() : 0);
             }
+        }
+
+        public void ResetLoopState()
+        {
+            isInLoop = false;
+            loopEnterGlobalTime = 0f;
+            currentLoopCount = 0;
+            holdAfterExit = false;
+            heldTime = 0f;
         }
 
         public bool InterpolateBefore(object leftValue, object rightValue, float factor)
