@@ -8,5 +8,27 @@
              _self.UpdateCursor();
              _self.Interpolate(true);
              _self.Interpolate(false);
-             isPlaying = false;
-         }
+@@ -1144,11 +1145,13 @@
+                         return;
+                 }
+ 
++                float effectiveTime = GetEffectiveTime(interpolable, _playbackTime);
++
+                 KeyValuePair<float, Keyframe> left = default;
+                 KeyValuePair<float, Keyframe> right = default;
+                 foreach (KeyValuePair<float, Keyframe> keyframePair in interpolable.keyframes)
+                 {
+-                    if (keyframePair.Key <= _playbackTime)
++                    if (keyframePair.Key <= effectiveTime)
+                         left = keyframePair;
+                     else
+                     {
+@@ -1160,7 +1163,7 @@
+                 bool res = true;
+                 if (left.Value != null && right.Value != null)
+                 {
+-                    float normalizedTime = (_playbackTime - left.Key) / (right.Key - left.Key);
++                    float normalizedTime = (effectiveTime - left.Key) / (right.Key - left.Key);
+                     normalizedTime = left.Value.curve.Evaluate(normalizedTime);
+                     if (before)
+                         res = interpolable.InterpolateBefore(left.Value.value, right.Value.value, normalizedTime);
