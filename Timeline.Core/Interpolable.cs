@@ -1,4 +1,4 @@
-﻿using Studio;
+using Studio;
 using System.Collections.Generic;
 using System.Xml;
 using UnityEngine;
@@ -16,6 +16,17 @@ namespace Timeline
         public bool enabled = true;
         public Color color = Color.white;
         public string alias = "";
+
+        /// <summary>
+        /// Loop group tag (case-insensitive). Empty = not part of any tag loop.
+        /// </summary>
+        public string tag = "";
+
+        /// <summary>
+        /// Loop speed multiplier for this track when in a tag loop.
+        /// localT = from + ((T - statTime) * loopScale) % (to - from)
+        /// </summary>
+        public float loopScale = 1f;
 
         public Interpolable(ObjectCtrlInfo oci, InterpolableModel interpolableModel) : base(interpolableModel.GetParameter(oci), interpolableModel)
         {
@@ -99,6 +110,21 @@ namespace Timeline
         public override string ToString()
         {
             return $"oci: [{oci}] " + base.ToString();
+        }
+
+        public static string NormalizeTag(string tag)
+        {
+            if (string.IsNullOrEmpty(tag))
+                return "";
+            return tag.Trim().ToLowerInvariant();
+        }
+
+        public bool IsLoopConfigTrack()
+        {
+            return id == Timeline.LoopFromId
+                || id == Timeline.LoopToId
+                || id == Timeline.LoopStatId
+                || id == Timeline.LoopEndId;
         }
     }
 }
