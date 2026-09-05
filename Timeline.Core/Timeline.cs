@@ -62,6 +62,10 @@ namespace Timeline
         public const string Version = "1.5.6";
         public const string GUID = "com.joan6694.illusionplugins.timeline";
         internal const string _ownerId = "Timeline";
+        public const string LoopFromId = "loop_from";
+        public const string LoopToId = "loop_to";
+        public const string LoopStatId = "loop_stat";
+        public const string LoopEndId = "loop_end";
 #if KOIKATSU || AISHOUJO || HONEYSELECT2
         private const int _saveVersion = 0;
         private const string _extSaveKey = "timeline";
@@ -236,6 +240,7 @@ namespace Timeline
         private readonly List<InterpolableModelDisplay> _displayedInterpolableModels = new List<InterpolableModelDisplay>();
         private readonly List<float> _gridHeights = new List<float>();
         private readonly List<RawImage> _interpolableSeparators = new List<RawImage>();
+        private readonly List<RawImage> _loopRegionOverlays = new List<RawImage>();
         private RectTransform _keyframesContainer;
         private RectTransform _miscContainer;
         private GameObject _keyframePrefab;
@@ -1127,6 +1132,8 @@ namespace Timeline
 
         private void Interpolate(bool before)
         {
+            Dictionary<string, TagLoopRegion> regions = BuildTagLoopRegions();
+
             _interpolablesTree.Recurse((node, depth) =>
             {
                 if (node.type != INodeType.Leaf)
@@ -2730,6 +2737,8 @@ namespace Timeline
 
         private void UpdateGrid()
         {
+            DrawLoopRegionOverlays();
+
             _durationInputField.text = $"{Mathf.FloorToInt(_duration / 60):00}:{(_duration % 60):00.00}";
 
             _horizontalScrollView.content.sizeDelta = new Vector2(_baseGridWidth * _zoomLevel * _duration / 10f, _horizontalScrollView.content.sizeDelta.y);
@@ -2858,7 +2867,53 @@ namespace Timeline
 
                                             break;
                                         case PointerEventData.InputButton.Right:
-                                            SeekPlaybackTime(display.keyframe.parent.keyframes.First(k => k.Value == display.keyframe).Key);
+                                            {
+                                                KeyValuePair<float, Keyframe> kPair = display.keyframe.parent.keyframes.First(k => k.Value == display.keyframe);
+                                                SeekPlaybackTime(kPair.Key);
+                                                if (display.keyframe.parent.IsLoopConfigTrack() || display.keyframe.value is string)
+                                                {
+                                                    if (_selectedKeyframes.Count == 0 || _selectedKeyframes.Any(k => k.Value == display.keyframe) == false)
+                                                        SelectKeyframes(kPair);
+                                                    List<AContextMenuElement> kfElements = new List<AContextMenuElement>();
+                                                    kfElements.Add(new LeafElement()
+                                                    {
+                                                        icon = _renameSprite,
+                                                        text = "Set Tag Value...",
+                                                        onClick = p =>
+                                                        {
+                                                            // Reuse interpolable row input if available; otherwise log
+                                                            string current = display.keyframe.value as string ?? "";
+                                                            // Find a visible interpolable display to borrow InputField
+                                                            InterpolableDisplay host = _displayedInterpolables.Find(d => d.gameObject.activeSelf);
+                                                            if (host == null)
+                                                            {
+                                                                Logger.LogMessage("Set tag value: current=[" + current + "]. Select a track row first.");
+                                                                return;
+                                                            }
+                                                            host.inputField.gameObject.SetActive(true);
+                                                            host.inputField.onEndEdit = new InputField.SubmitEvent();
+                                                            host.inputField.text = current;
+                                                            host.inputField.onEndEdit.AddListener(s =>
+                                                            {
+                                                                string v = s != null ? s.Trim() : "";
+                                                                foreach (KeyValuePair<float, Keyframe> sel in _selectedKeyframes)
+                                                                {
+                                                                    if (sel.Value.parent.IsLoopConfigTrack() || sel.Value.value is string)
+                                                                        sel.Value.value = v;
+                                                                }
+                                                                host.inputField.gameObject.SetActive(false);
+                                                                UpdateKeyframeWindow(true);
+                                                                UpdateGrid();
+                                                            });
+                                                            host.inputField.ActivateInputField();
+                                                            host.inputField.Select();
+                                                        }
+                                                    });
+                                                    Vector2 lp;
+                                                    if (RectTransformUtility.ScreenPointToLocalPointInRectangle((RectTransform)_ui.transform, e.position, e.pressEventCamera, out lp))
+                                                        UIUtility.ShowContextMenu(_ui, lp, kfElements, 180);
+                                                }
+                                            }
                                             break;
                                         case PointerEventData.InputButton.Middle:
                                             if (Input.GetKey(KeyCode.LeftControl))
@@ -4665,6 +4720,8 @@ namespace Timeline
                         localWriter.WriteAttributeString("bgColorB", XmlConvert.ToString(interpolable.color.b));
 
                         localWriter.WriteAttributeString("alias", interpolable.alias);
+                        localWriter.WriteAttributeString("tag", interpolable.tag ?? "");
+                        localWriter.WriteAttributeString("loopScale", XmlConvert.ToString(interpolable.loopScale));
 
                         foreach (KeyValuePair<float, Keyframe> keyframePair in interpolable.keyframes)
                         {
