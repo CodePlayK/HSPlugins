@@ -1,1 +1,10 @@
-see artifacts
+--- a/Timeline.Core/Timeline.cs
++++ b/Timeline.Core/Timeline.cs
+@@ -513,6 +513,7 @@
+         public static void Stop()
+         {
+             _self._playbackTime = 0f;
++            _self.ResetAllLoopStates();
+             _self.UpdateCursor();
+             _self.Interpolate(true);
+             _self.Interpolate(false);
