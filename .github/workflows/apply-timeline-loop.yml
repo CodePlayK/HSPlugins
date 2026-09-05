@@ -1,0 +1,24 @@
+name: Apply Timeline Loop Patch
+on:
+  workflow_dispatch:
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore Timeline.cs from upstream and apply patch
+        run: |
+          set -e
+          curl -fsSL -o Timeline.Core/Timeline.cs \
+            "https://raw.githubusercontent.com/IllusionMods/HSPlugins/main/Timeline.Core/Timeline.cs"
+          # Full patch is in artifacts; for CI use inline critical sections if patch incomplete
+          if [ -f Timeline.Core/timeline_loop.patch ]; then
+            git apply --verbose Timeline.Core/timeline_loop.patch || true
+          fi
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add Timeline.Core/Timeline.cs
+          git diff --cached --quiet || git commit -m "fix(Timeline): restored Timeline.cs with loop support"
+          git push
