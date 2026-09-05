@@ -1,4 +1,4 @@
-﻿using Studio;
+using Studio;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -62,6 +62,10 @@ namespace Timeline
         public const string Version = "1.5.6";
         public const string GUID = "com.joan6694.illusionplugins.timeline";
         internal const string _ownerId = "Timeline";
+        public const string LoopFromId = "loop_from";
+        public const string LoopToId = "loop_to";
+        public const string LoopStatId = "loop_stat";
+        public const string LoopEndId = "loop_end";
 #if KOIKATSU || AISHOUJO || HONEYSELECT2
         private const int _saveVersion = 0;
         private const string _extSaveKey = "timeline";
@@ -236,6 +240,7 @@ namespace Timeline
         private readonly List<InterpolableModelDisplay> _displayedInterpolableModels = new List<InterpolableModelDisplay>();
         private readonly List<float> _gridHeights = new List<float>();
         private readonly List<RawImage> _interpolableSeparators = new List<RawImage>();
+        private readonly List<RawImage> _loopRegionOverlays = new List<RawImage>();
         private RectTransform _keyframesContainer;
         private RectTransform _miscContainer;
         private GameObject _keyframePrefab;
@@ -1126,6 +1131,8 @@ namespace Timeline
 
         private void Interpolate(bool before)
         {
+            Dictionary<string, TagLoopRegion> regions = BuildTagLoopRegions();
+
             _interpolablesTree.Recurse((node, depth) =>
             {
                 if (node.type != INodeType.Leaf)
@@ -1144,11 +1151,24 @@ namespace Timeline
                         return;
                 }
 
+                // Config marker tracks do not drive scene state
+                if (interpolable.IsLoopConfigTrack())
+                    return;
+
+                float sampleTime;
+                float loopFrom;
+                float loopTo;
+                bool inLoop = TryGetLoopSampleTime(interpolable, _playbackTime, regions, out sampleTime, out loopFrom, out loopTo);
+
                 KeyValuePair<float, Keyframe> left = default;
                 KeyValuePair<float, Keyframe> right = default;
                 foreach (KeyValuePair<float, Keyframe> keyframePair in interpolable.keyframes)
                 {
-                    if (keyframePair.Key <= _playbackTime)
+                    // When looping, ignore keyframes outside [from, to]
+                    if (inLoop && (keyframePair.Key < loopFrom || keyframePair.Key > loopTo))
+                        continue;
+
+                    if (keyframePair.Key <= sampleTime)
                         left = keyframePair;
                     else
                     {
@@ -1160,7 +1180,7 @@ namespace Timeline
                 bool res = true;
                 if (left.Value != null && right.Value != null)
                 {
-                    float normalizedTime = (_playbackTime - left.Key) / (right.Key - left.Key);
+                    float normalizedTime = (sampleTime - left.Key) / (right.Key - left.Key);
                     normalizedTime = left.Value.curve.Evaluate(normalizedTime);
                     if (before)
                         res = interpolable.InterpolateBefore(left.Value.value, right.Value.value, normalizedTime);
@@ -1184,6 +1204,228 @@ namespace Timeline
                 if (res == false)
                     _toDelete.Add(interpolable);
             });
+        }
+
+        private sealed class TagLoopRegion
+        {
+            public float from;
+            public float to;
+            public readonly List<float> stats = new List<float>();
+            public readonly List<float> ends = new List<float>();
+            public bool valid;
+            public string error;
+        }
+
+        private Dictionary<string, TagLoopRegion> BuildTagLoopRegions()
+        {
+            var regions = new Dictionary<string, TagLoopRegion>();
+            var fromCount = new Dictionary<string, int>();
+            var toCount = new Dictionary<string, int>();
+
+            foreach (Interpolable interp in _interpolables.Values)
+            {
+                if (interp.enabled == false || interp.IsLoopConfigTrack() == false)
+                    continue;
+
+                foreach (KeyValuePair<float, Keyframe> kv in interp.keyframes)
+                {
+                    string tag = Interpolable.NormalizeTag(kv.Value.value as string);
+                    if (tag.Length == 0)
+                        continue;
+
+                    TagLoopRegion region;
+                    if (regions.TryGetValue(tag, out region) == false)
+                    {
+                        region = new TagLoopRegion();
+                        regions.Add(tag, region);
+                    }
+
+                    if (interp.id == LoopFromId)
+                    {
+                        region.from = kv.Key;
+                        int c;
+                        fromCount.TryGetValue(tag, out c);
+                        fromCount[tag] = c + 1;
+                    }
+                    else if (interp.id == LoopToId)
+                    {
+                        region.to = kv.Key;
+                        int c;
+                        toCount.TryGetValue(tag, out c);
+                        toCount[tag] = c + 1;
+                    }
+                    else if (interp.id == LoopStatId)
+                    {
+                        region.stats.Add(kv.Key);
+                    }
+                    else if (interp.id == LoopEndId)
+                    {
+                        region.ends.Add(kv.Key);
+                    }
+                }
+            }
+
+            foreach (KeyValuePair<string, TagLoopRegion> pair in regions)
+            {
+                string tag = pair.Key;
+                TagLoopRegion region = pair.Value;
+                int fc = 0, tc = 0;
+                fromCount.TryGetValue(tag, out fc);
+                toCount.TryGetValue(tag, out tc);
+
+                if (fc > 1 || tc > 1)
+                {
+                    region.valid = false;
+                    region.error = "Tag \"" + tag + "\" has multiple loop_from/loop_to markers (only one pair allowed).";
+                    Logger.LogMessage(region.error);
+                    continue;
+                }
+                if (fc == 0 || tc == 0)
+                {
+                    region.valid = false;
+                    region.error = "Tag \"" + tag + "\" is missing loop_from or loop_to.";
+                    continue;
+                }
+                if (region.to <= region.from)
+                {
+                    region.valid = false;
+                    region.error = "Tag \"" + tag + "\" has invalid range (to <= from).";
+                    Logger.LogMessage(region.error);
+                    continue;
+                }
+
+                region.stats.Sort();
+                region.ends.Sort();
+                region.valid = true;
+            }
+
+            return regions;
+        }
+
+        /// <summary>
+        /// Pure evaluation: given global axis time T, compute sample time for a business track.
+        /// Config tracks always use global time.
+        /// </summary>
+        private bool TryGetLoopSampleTime(Interpolable interp, float globalTime, Dictionary<string, TagLoopRegion> regions, out float sampleTime, out float loopFrom, out float loopTo)
+        {
+            sampleTime = globalTime;
+            loopFrom = 0f;
+            loopTo = 0f;
+
+            if (interp.IsLoopConfigTrack())
+                return false;
+
+            string tag = Interpolable.NormalizeTag(interp.tag);
+            if (tag.Length == 0)
+                return false;
+
+            TagLoopRegion region;
+            if (regions.TryGetValue(tag, out region) == false || region.valid == false)
+                return false;
+
+            // Find last valid stat at or before T with statTime >= from (else invalid)
+            float? statTime = null;
+            for (int s = region.stats.Count - 1; s >= 0; s--)
+            {
+                float st = region.stats[s];
+                if (st > globalTime)
+                    continue;
+                if (st < region.from)
+                    continue; // invalid per spec
+                statTime = st;
+                break;
+            }
+            if (statTime.HasValue == false)
+                return false;
+
+            // If any end in (statTime, T], loop is inactive
+            for (int e = 0; e < region.ends.Count; e++)
+            {
+                float et = region.ends[e];
+                if (et > statTime.Value && et <= globalTime)
+                    return false;
+            }
+
+            float scale = interp.loopScale;
+            if (scale <= 0f)
+                scale = 1f;
+
+            float duration = region.to - region.from;
+            float elapsed = (globalTime - statTime.Value) * scale;
+            // floor-mod for positive ranges
+            float mod = elapsed % duration;
+            if (mod < 0f)
+                mod += duration;
+
+            sampleTime = region.from + mod;
+            loopFrom = region.from;
+            loopTo = region.to;
+            return true;
+        }
+
+        private float GetEffectiveTime(Interpolable interp, float globalTime)
+        {
+            // Fallback single-call path (builds regions each time). Prefer Interpolate() path.
+            var regions = BuildTagLoopRegions();
+            float sample;
+            float from, to;
+            if (TryGetLoopSampleTime(interp, globalTime, regions, out sample, out from, out to))
+                return sample;
+            return globalTime;
+        }
+
+
+
+        private static Color ColorForTag(string tag)
+        {
+            unchecked
+            {
+                int hash = tag != null ? tag.GetHashCode() : 0;
+                float h = ((hash & 0x7fffffff) % 360) / 360f;
+                return Color.HSVToRGB(h, 0.55f, 0.95f);
+            }
+        }
+
+        private void DrawLoopRegionOverlays()
+        {
+            Dictionary<string, TagLoopRegion> regions = BuildTagLoopRegions();
+            int index = 0;
+            float gridWidth = _baseGridWidth * _zoomLevel;
+            if (_grid != null)
+                gridWidth = _grid.rect.width;
+
+            foreach (KeyValuePair<string, TagLoopRegion> pair in regions)
+            {
+                if (pair.Value.valid == false)
+                    continue;
+
+                RawImage img;
+                if (index < _loopRegionOverlays.Count)
+                    img = _loopRegionOverlays[index];
+                else
+                {
+                    img = UIUtility.CreateRawImage("LoopRegion", _keyframesContainer != null ? _keyframesContainer : _miscContainer);
+                    img.raycastTarget = false;
+                    _loopRegionOverlays.Add(img);
+                }
+                img.gameObject.SetActive(true);
+                Color c = ColorForTag(pair.Key);
+                c.a = 0.22f;
+                img.color = c;
+
+                float x0 = pair.Value.from * gridWidth / _duration;
+                float x1 = pair.Value.to * gridWidth / _duration;
+                RectTransform rt = img.rectTransform;
+                rt.anchorMin = new Vector2(0f, 0f);
+                rt.anchorMax = new Vector2(0f, 1f);
+                rt.pivot = new Vector2(0f, 0.5f);
+                rt.anchoredPosition = new Vector2(x0, 0f);
+                rt.sizeDelta = new Vector2(Mathf.Max(1f, x1 - x0), 0f);
+                index++;
+            }
+
+            for (; index < _loopRegionOverlays.Count; index++)
+                _loopRegionOverlays[index].gameObject.SetActive(false);
         }
 
         private float ParseTime(string timeString)
@@ -1528,6 +1770,11 @@ namespace Timeline
                         }
                         else
                             display.name.text = interpolable.alias;
+
+                        if (string.IsNullOrEmpty(interpolable.tag) == false)
+                            display.name.text += " [" + interpolable.tag + "]";
+                        if (interpolable.IsLoopConfigTrack())
+                            display.name.text += " ⚙";
                         display.gridBackground.gameObject.SetActive(true);
                         display.gridBackground.rectTransform.SetRect(new Vector2(0f, 1f), Vector2.one, new Vector2(0f, -height - interpolableHeight), new Vector2(0f, -height));
                         UpdateInterpolableColor(display, interpolable.color);
@@ -1885,6 +2132,76 @@ namespace Timeline
                                         UpdateInterpolablesView();
                                     }
                                 });
+                                // === Tag loop controls ===
+                                {
+                                    elements.Add(new LeafElement()
+                                    {
+                                        icon = _renameSprite,
+                                        text = "Set Loop Tag...",
+                                        onClick = p =>
+                                        {
+                                            if (currentlySelectedInterpolables.Count == 0)
+                                                return;
+                                            Interpolable first = currentlySelectedInterpolables[0];
+                                            display.inputField.gameObject.SetActive(true);
+                                            display.inputField.onEndEdit = new InputField.SubmitEvent();
+                                            display.inputField.text = first.tag ?? "";
+                                            display.inputField.onEndEdit.AddListener(s =>
+                                            {
+                                                string newTag = s != null ? s.Trim() : "";
+                                                foreach (Interpolable interp in currentlySelectedInterpolables)
+                                                    interp.tag = newTag;
+                                                display.inputField.gameObject.SetActive(false);
+                                                UpdateInterpolablesView();
+                                            });
+                                            display.inputField.ActivateInputField();
+                                            display.inputField.Select();
+                                        }
+                                    });
+
+                                    elements.Add(new LeafElement()
+                                    {
+                                        icon = _checkboxCompositeSprite,
+                                        text = "Set Loop Scale...",
+                                        onClick = p =>
+                                        {
+                                            if (currentlySelectedInterpolables.Count == 0)
+                                                return;
+                                            Interpolable first = currentlySelectedInterpolables[0];
+                                            display.inputField.gameObject.SetActive(true);
+                                            display.inputField.onEndEdit = new InputField.SubmitEvent();
+                                            display.inputField.text = first.loopScale.ToString();
+                                            display.inputField.onEndEdit.AddListener(s =>
+                                            {
+                                                float scale;
+                                                if (float.TryParse(s, out scale) == false || scale <= 0f)
+                                                    scale = 1f;
+                                                foreach (Interpolable interp in currentlySelectedInterpolables)
+                                                    interp.loopScale = scale;
+                                                display.inputField.gameObject.SetActive(false);
+                                                UpdateInterpolablesView();
+                                            });
+                                            display.inputField.ActivateInputField();
+                                            display.inputField.Select();
+                                        }
+                                    });
+
+                                    elements.Add(new LeafElement()
+                                    {
+                                        icon = _checkboxSprite,
+                                        text = "Clear Loop Tag",
+                                        onClick = p =>
+                                        {
+                                            foreach (Interpolable interp in currentlySelectedInterpolables)
+                                            {
+                                                interp.tag = "";
+                                                interp.loopScale = 1f;
+                                            }
+                                            UpdateInterpolablesView();
+                                        }
+                                    });
+                                }
+
                                 elements.Add(new LeafElement()
                                 {
                                     icon = _deleteSprite,
@@ -2465,6 +2782,8 @@ namespace Timeline
 
         private void UpdateGrid()
         {
+            DrawLoopRegionOverlays();
+
             _durationInputField.text = $"{Mathf.FloorToInt(_duration / 60):00}:{(_duration % 60):00.00}";
 
             _horizontalScrollView.content.sizeDelta = new Vector2(_baseGridWidth * _zoomLevel * _duration / 10f, _horizontalScrollView.content.sizeDelta.y);
@@ -2593,7 +2912,53 @@ namespace Timeline
 
                                             break;
                                         case PointerEventData.InputButton.Right:
-                                            SeekPlaybackTime(display.keyframe.parent.keyframes.First(k => k.Value == display.keyframe).Key);
+                                            {
+                                                KeyValuePair<float, Keyframe> kPair = display.keyframe.parent.keyframes.First(k => k.Value == display.keyframe);
+                                                SeekPlaybackTime(kPair.Key);
+                                                if (display.keyframe.parent.IsLoopConfigTrack() || display.keyframe.value is string)
+                                                {
+                                                    if (_selectedKeyframes.Count == 0 || _selectedKeyframes.Any(k => k.Value == display.keyframe) == false)
+                                                        SelectKeyframes(kPair);
+                                                    List<AContextMenuElement> kfElements = new List<AContextMenuElement>();
+                                                    kfElements.Add(new LeafElement()
+                                                    {
+                                                        icon = _renameSprite,
+                                                        text = "Set Tag Value...",
+                                                        onClick = p =>
+                                                        {
+                                                            // Reuse interpolable row input if available; otherwise log
+                                                            string current = display.keyframe.value as string ?? "";
+                                                            // Find a visible interpolable display to borrow InputField
+                                                            InterpolableDisplay host = _displayedInterpolables.Find(d => d.gameObject.activeSelf);
+                                                            if (host == null)
+                                                            {
+                                                                Logger.LogMessage("Set tag value: current=[" + current + "]. Select a track row first.");
+                                                                return;
+                                                            }
+                                                            host.inputField.gameObject.SetActive(true);
+                                                            host.inputField.onEndEdit = new InputField.SubmitEvent();
+                                                            host.inputField.text = current;
+                                                            host.inputField.onEndEdit.AddListener(s =>
+                                                            {
+                                                                string v = s != null ? s.Trim() : "";
+                                                                foreach (KeyValuePair<float, Keyframe> sel in _selectedKeyframes)
+                                                                {
+                                                                    if (sel.Value.parent.IsLoopConfigTrack() || sel.Value.value is string)
+                                                                        sel.Value.value = v;
+                                                                }
+                                                                host.inputField.gameObject.SetActive(false);
+                                                                UpdateKeyframeWindow(true);
+                                                                UpdateGrid();
+                                                            });
+                                                            host.inputField.ActivateInputField();
+                                                            host.inputField.Select();
+                                                        }
+                                                    });
+                                                    Vector2 lp;
+                                                    if (RectTransformUtility.ScreenPointToLocalPointInRectangle((RectTransform)_ui.transform, e.position, e.pressEventCamera, out lp))
+                                                        UIUtility.ShowContextMenu(_ui, lp, kfElements, 180);
+                                                }
+                                            }
                                             break;
                                         case PointerEventData.InputButton.Middle:
                                             if (Input.GetKey(KeyCode.LeftControl))
@@ -4304,6 +4669,15 @@ namespace Timeline
                     if (interpolableNode.Attributes["alias"] != null)
                         interpolable.alias = interpolableNode.Attributes["alias"].Value;
 
+                    if (interpolableNode.Attributes["tag"] != null)
+                        interpolable.tag = interpolableNode.Attributes["tag"].Value ?? "";
+                    if (interpolableNode.Attributes["loopScale"] != null)
+                    {
+                        interpolable.loopScale = XmlConvert.ToSingle(interpolableNode.Attributes["loopScale"].Value);
+                        if (interpolable.loopScale <= 0f)
+                            interpolable.loopScale = 1f;
+                    }
+
                     if (_interpolables.ContainsKey(interpolable.GetHashCode()) == false)
                     {
                         _interpolables.Add(interpolable.GetHashCode(), interpolable);
@@ -4383,6 +4757,8 @@ namespace Timeline
                         localWriter.WriteAttributeString("bgColorB", XmlConvert.ToString(interpolable.color.b));
 
                         localWriter.WriteAttributeString("alias", interpolable.alias);
+                        localWriter.WriteAttributeString("tag", interpolable.tag ?? "");
+                        localWriter.WriteAttributeString("loopScale", XmlConvert.ToString(interpolable.loopScale));
 
                         foreach (KeyValuePair<float, Keyframe> keyframePair in interpolable.keyframes)
                         {
