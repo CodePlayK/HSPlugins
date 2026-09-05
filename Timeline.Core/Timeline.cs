@@ -2000,8 +2000,8 @@ namespace Timeline
                                 });
                                 // === Loop controls (phase 1+2) ===
                                 {
-                                    bool anyLoop = currentlySelectedInterpolables.Exists(i => i.loopEnabled);
-                                    bool allLoop = currentlySelectedInterpolables.TrueForAll(i => i.loopEnabled);
+                                    bool anyLoop = currentlySelectedInterpolables.Exists(x => x.loopEnabled);
+                                    bool allLoop = currentlySelectedInterpolables.TrueForAll(x => x.loopEnabled);
 
                                     elements.Add(new LeafElement()
                                     {
@@ -2098,12 +2098,12 @@ namespace Timeline
 
                                     var maxLoopElements = new List<AContextMenuElement>
                                     {
-                                        new LeafElement() { text = "Infinite", onClick = p => { foreach (var i in currentlySelectedInterpolables) { i.maxLoops = -1; i.ResetLoopState(); } } },
-                                        new LeafElement() { text = "1", onClick = p => { foreach (var i in currentlySelectedInterpolables) { i.maxLoops = 1; i.ResetLoopState(); } } },
-                                        new LeafElement() { text = "2", onClick = p => { foreach (var i in currentlySelectedInterpolables) { i.maxLoops = 2; i.ResetLoopState(); } } },
-                                        new LeafElement() { text = "3", onClick = p => { foreach (var i in currentlySelectedInterpolables) { i.maxLoops = 3; i.ResetLoopState(); } } },
-                                        new LeafElement() { text = "5", onClick = p => { foreach (var i in currentlySelectedInterpolables) { i.maxLoops = 5; i.ResetLoopState(); } } },
-                                        new LeafElement() { text = "10", onClick = p => { foreach (var i in currentlySelectedInterpolables) { i.maxLoops = 10; i.ResetLoopState(); } } },
+                                        new LeafElement() { text = "Infinite", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.maxLoops = -1; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "1", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.maxLoops = 1; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "2", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.maxLoops = 2; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "3", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.maxLoops = 3; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "5", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.maxLoops = 5; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "10", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.maxLoops = 10; interp.ResetLoopState(); } } },
                                     };
                                     elements.Add(new GroupElement()
                                     {
@@ -2114,8 +2114,8 @@ namespace Timeline
 
                                     var enterElements = new List<AContextMenuElement>
                                     {
-                                        new LeafElement() { text = "Always", onClick = p => { foreach (var i in currentlySelectedInterpolables) { i.enterCondition = LoopEnterCondition.Always; i.ResetLoopState(); } } },
-                                        new LeafElement() { text = "Manual", onClick = p => { foreach (var i in currentlySelectedInterpolables) { i.enterCondition = LoopEnterCondition.Manual; i.ResetLoopState(); } } },
+                                        new LeafElement() { text = "Always", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.enterCondition = LoopEnterCondition.Always; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "Manual", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.enterCondition = LoopEnterCondition.Manual; interp.ResetLoopState(); } } },
                                     };
                                     elements.Add(new GroupElement()
                                     {
@@ -2126,9 +2126,9 @@ namespace Timeline
 
                                     var exitElements = new List<AContextMenuElement>
                                     {
-                                        new LeafElement() { text = "Never", onClick = p => { foreach (var i in currentlySelectedInterpolables) { i.exitCondition = LoopExitCondition.Never; i.ResetLoopState(); } } },
-                                        new LeafElement() { text = "After Max Loops", onClick = p => { foreach (var i in currentlySelectedInterpolables) { i.exitCondition = LoopExitCondition.AfterMaxLoops; i.ResetLoopState(); } } },
-                                        new LeafElement() { text = "After One Full Loop", onClick = p => { foreach (var i in currentlySelectedInterpolables) { i.exitCondition = LoopExitCondition.AtLoopEndOnce; i.ResetLoopState(); } } },
+                                        new LeafElement() { text = "Never", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.exitCondition = LoopExitCondition.Never; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "After Max Loops", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.exitCondition = LoopExitCondition.AfterMaxLoops; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "After One Full Loop", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.exitCondition = LoopExitCondition.AtLoopEndOnce; interp.ResetLoopState(); } } },
                                     };
                                     elements.Add(new GroupElement()
                                     {
@@ -2139,8 +2139,8 @@ namespace Timeline
 
                                     var exitBehaviorElements = new List<AContextMenuElement>
                                     {
-                                        new LeafElement() { text = "Continue Global Time", onClick = p => { foreach (var i in currentlySelectedInterpolables) { i.exitBehavior = LoopExitBehavior.ContinueGlobalTime; i.ResetLoopState(); } } },
-                                        new LeafElement() { text = "Hold Last Value", onClick = p => { foreach (var i in currentlySelectedInterpolables) { i.exitBehavior = LoopExitBehavior.HoldLastValue; i.ResetLoopState(); } } },
+                                        new LeafElement() { text = "Continue Global Time", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.exitBehavior = LoopExitBehavior.ContinueGlobalTime; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "Hold Last Value", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.exitBehavior = LoopExitBehavior.HoldLastValue; interp.ResetLoopState(); } } },
                                     };
                                     elements.Add(new GroupElement()
                                     {
