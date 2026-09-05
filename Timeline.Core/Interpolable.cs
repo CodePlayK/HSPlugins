@@ -5,6 +5,25 @@ using UnityEngine;
 
 namespace Timeline
 {
+    public enum LoopEnterCondition
+    {
+        Always = 0,
+        Manual = 1
+    }
+
+    public enum LoopExitCondition
+    {
+        Never = 0,
+        AfterMaxLoops = 1,
+        AtLoopEndOnce = 2
+    }
+
+    public enum LoopExitBehavior
+    {
+        ContinueGlobalTime = 0,
+        HoldLastValue = 1
+    }
+
     public class Interpolable : InterpolableModel
     {
         private readonly int _hashCode;
@@ -17,16 +36,21 @@ namespace Timeline
         public Color color = Color.white;
         public string alias = "";
 
-        /// <summary>
-        /// Loop group tag (case-insensitive). Empty = not part of any tag loop.
-        /// </summary>
-        public string tag = "";
+        // === Loop support (phase 1) ===
+        public bool loopEnabled = false;
+        public float loopStart = 0f;
+        public float loopEnd = 0f;
+        public int maxLoops = -1; // -1 = infinite
+        public LoopEnterCondition enterCondition = LoopEnterCondition.Always;
+        public LoopExitCondition exitCondition = LoopExitCondition.Never;
+        public LoopExitBehavior exitBehavior = LoopExitBehavior.ContinueGlobalTime;
 
-        /// <summary>
-        /// Loop speed multiplier for this track when in a tag loop.
-        /// localT = from + ((T - statTime) * loopScale) % (to - from)
-        /// </summary>
-        public float loopScale = 1f;
+        // Runtime state (not serialized)
+        [System.NonSerialized] public bool isInLoop = false;
+        [System.NonSerialized] public float loopEnterGlobalTime = 0f;
+        [System.NonSerialized] public int currentLoopCount = 0;
+        [System.NonSerialized] public bool holdAfterExit = false;
+        [System.NonSerialized] public float heldTime = 0f;
 
         public Interpolable(ObjectCtrlInfo oci, InterpolableModel interpolableModel) : base(interpolableModel.GetParameter(oci), interpolableModel)
         {
@@ -50,6 +74,15 @@ namespace Timeline
                 int hash = base.GetHashCode();
                 _hashCode = hash * 31 + (this.oci != null ? this.oci.GetHashCode() : 0);
             }
+        }
+
+        public void ResetLoopState()
+        {
+            isInLoop = false;
+            loopEnterGlobalTime = 0f;
+            currentLoopCount = 0;
+            holdAfterExit = false;
+            heldTime = 0f;
         }
 
         public bool InterpolateBefore(object leftValue, object rightValue, float factor)

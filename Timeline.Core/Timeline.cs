@@ -1,4 +1,4 @@
-﻿using Studio;
+using Studio;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -513,6 +513,7 @@ namespace Timeline
         public static void Stop()
         {
             _self._playbackTime = 0f;
+            _self.ResetAllLoopStates();
             _self.UpdateCursor();
             _self.Interpolate(true);
             _self.Interpolate(false);
@@ -1144,11 +1145,13 @@ namespace Timeline
                         return;
                 }
 
+                float effectiveTime = GetEffectiveTime(interpolable, _playbackTime);
+
                 KeyValuePair<float, Keyframe> left = default;
                 KeyValuePair<float, Keyframe> right = default;
                 foreach (KeyValuePair<float, Keyframe> keyframePair in interpolable.keyframes)
                 {
-                    if (keyframePair.Key <= _playbackTime)
+                    if (keyframePair.Key <= effectiveTime)
                         left = keyframePair;
                     else
                     {
@@ -1160,7 +1163,7 @@ namespace Timeline
                 bool res = true;
                 if (left.Value != null && right.Value != null)
                 {
-                    float normalizedTime = (_playbackTime - left.Key) / (right.Key - left.Key);
+                    float normalizedTime = (effectiveTime - left.Key) / (right.Key - left.Key);
                     normalizedTime = left.Value.curve.Evaluate(normalizedTime);
                     if (before)
                         res = interpolable.InterpolateBefore(left.Value.value, right.Value.value, normalizedTime);
@@ -1184,6 +1187,108 @@ namespace Timeline
                 if (res == false)
                     _toDelete.Add(interpolable);
             });
+        }
+
+        /// <summary>
+        /// Compute the time used for keyframe sampling on a single interpolable.
+        /// Normal tracks use global time; looping tracks use local loop time when active.
+        /// </summary>
+        private float GetEffectiveTime(Interpolable interp, float globalTime)
+        {
+            if (interp.loopEnabled == false || interp.loopEnd <= interp.loopStart)
+                return globalTime;
+
+            float loopDuration = interp.loopEnd - interp.loopStart;
+
+            // Holding last value after exit
+            if (interp.holdAfterExit)
+                return interp.heldTime;
+
+            // Before loop region
+            if (globalTime < interp.loopStart)
+            {
+                if (interp.isInLoop)
+                    interp.ResetLoopState();
+                return globalTime;
+            }
+
+            // Try enter
+            if (interp.isInLoop == false)
+            {
+                if (ShouldEnterLoop(interp, globalTime))
+                {
+                    interp.isInLoop = true;
+                    interp.loopEnterGlobalTime = globalTime;
+                    interp.currentLoopCount = 0;
+                    interp.holdAfterExit = false;
+                }
+                else
+                    return globalTime;
+            }
+
+            // Inside loop
+            if (interp.isInLoop)
+            {
+                float elapsed = globalTime - interp.loopEnterGlobalTime;
+                if (elapsed < 0f)
+                    elapsed = 0f;
+
+                int loopsCompleted = Mathf.FloorToInt(elapsed / loopDuration);
+                interp.currentLoopCount = loopsCompleted;
+
+                if (ShouldExitLoop(interp, globalTime, loopsCompleted))
+                {
+                    interp.isInLoop = false;
+                    if (interp.exitBehavior == LoopExitBehavior.HoldLastValue)
+                    {
+                        interp.holdAfterExit = true;
+                        // Hold at end of loop (or last keyframe before loopEnd)
+                        interp.heldTime = interp.loopEnd;
+                        return interp.heldTime;
+                    }
+                    // Continue with global time
+                    return globalTime;
+                }
+
+                float localTime = interp.loopStart + (elapsed % loopDuration);
+                return localTime;
+            }
+
+            return globalTime;
+        }
+
+        private static bool ShouldEnterLoop(Interpolable interp, float globalTime)
+        {
+            switch (interp.enterCondition)
+            {
+                case LoopEnterCondition.Always:
+                    return globalTime >= interp.loopStart;
+                case LoopEnterCondition.Manual:
+                    return false; // external trigger only (future)
+                default:
+                    return false;
+            }
+        }
+
+        private static bool ShouldExitLoop(Interpolable interp, float globalTime, int loopsCompleted)
+        {
+            switch (interp.exitCondition)
+            {
+                case LoopExitCondition.Never:
+                    return false;
+                case LoopExitCondition.AfterMaxLoops:
+                    return interp.maxLoops >= 0 && loopsCompleted >= interp.maxLoops;
+                case LoopExitCondition.AtLoopEndOnce:
+                    return loopsCompleted >= 1;
+                default:
+                    return false;
+            }
+        }
+
+        private void ResetAllLoopStates()
+        {
+            foreach (Interpolable interp in _interpolables.Values)
+                interp.ResetLoopState();
         }
 
         private float ParseTime(string timeString)
@@ -1528,6 +1633,14 @@ namespace Timeline
                         }
                         else
                             display.name.text = interpolable.alias;
+
+                        if (interpolable.loopEnabled)
+                        {
+                            string loopTag = interpolable.isInLoop
+                                ? $" ↻{interpolable.currentLoopCount}"
+                                : " ↻";
+                            display.name.text += loopTag;
+                        }
                         display.gridBackground.gameObject.SetActive(true);
                         display.gridBackground.rectTransform.SetRect(new Vector2(0f, 1f), Vector2.one, new Vector2(0f, -height - interpolableHeight), new Vector2(0f, -height));
                         UpdateInterpolableColor(display, interpolable.color);
@@ -1885,6 +1998,158 @@ namespace Timeline
                                         UpdateInterpolablesView();
                                     }
                                 });
+                                // === Loop controls (phase 1+2) ===
+                                {
+                                    bool anyLoop = currentlySelectedInterpolables.Exists(x => x.loopEnabled);
+                                    bool allLoop = currentlySelectedInterpolables.TrueForAll(x => x.loopEnabled);
+
+                                    elements.Add(new LeafElement()
+                                    {
+                                        icon = _checkboxSprite,
+                                        text = allLoop ? "Disable Loop" : "Enable Loop",
+                                        onClick = p =>
+                                        {
+                                            bool enable = !allLoop;
+                                            foreach (Interpolable interp in currentlySelectedInterpolables)
+                                            {
+                                                interp.loopEnabled = enable;
+                                                if (enable)
+                                                {
+                                                    // Default range: first ~ last keyframe if available
+                                                    if (interp.keyframes.Count >= 2)
+                                                    {
+                                                        interp.loopStart = interp.keyframes.Keys[0];
+                                                        interp.loopEnd = interp.keyframes.Keys[interp.keyframes.Count - 1];
+                                                    }
+                                                    else if (interp.loopEnd <= interp.loopStart)
+                                                    {
+                                                        interp.loopStart = 0f;
+                                                        interp.loopEnd = _duration;
+                                                    }
+                                                }
+                                                interp.ResetLoopState();
+                                            }
+                                            UpdateInterpolablesView();
+                                        }
+                                    });
+
+                                    elements.Add(new LeafElement()
+                                    {
+                                        icon = _selectAllSprite,
+                                        text = "Set Loop Range from Selected Keyframes",
+                                        onClick = p =>
+                                        {
+                                            var times = _selectedKeyframes.Select(k => k.Key).OrderBy(t => t).ToList();
+                                            if (times.Count < 2)
+                                            {
+                                                Logger.LogMessage("Select at least 2 keyframes to define loop range.");
+                                                return;
+                                            }
+                                            float start = times.First();
+                                            float end = times.Last();
+                                            foreach (Interpolable interp in currentlySelectedInterpolables)
+                                            {
+                                                interp.loopEnabled = true;
+                                                interp.loopStart = start;
+                                                interp.loopEnd = end;
+                                                interp.ResetLoopState();
+                                            }
+                                            UpdateInterpolablesView();
+                                        }
+                                    });
+
+                                    elements.Add(new LeafElement()
+                                    {
+                                        icon = _addSprite,
+                                        text = "Set Loop Start to Cursor",
+                                        onClick = p =>
+                                        {
+                                            float t = _playbackTime % _duration;
+                                            foreach (Interpolable interp in currentlySelectedInterpolables)
+                                            {
+                                                interp.loopStart = t;
+                                                if (interp.loopEnd <= interp.loopStart)
+                                                    interp.loopEnd = Mathf.Min(t + 1f, _duration);
+                                                interp.loopEnabled = true;
+                                                interp.ResetLoopState();
+                                            }
+                                            UpdateInterpolablesView();
+                                        }
+                                    });
+
+                                    elements.Add(new LeafElement()
+                                    {
+                                        icon = _addSprite,
+                                        text = "Set Loop End to Cursor",
+                                        onClick = p =>
+                                        {
+                                            float t = _playbackTime % _duration;
+                                            foreach (Interpolable interp in currentlySelectedInterpolables)
+                                            {
+                                                interp.loopEnd = t;
+                                                if (interp.loopEnd <= interp.loopStart)
+                                                    interp.loopStart = Mathf.Max(0f, t - 1f);
+                                                interp.loopEnabled = true;
+                                                interp.ResetLoopState();
+                                            }
+                                            UpdateInterpolablesView();
+                                        }
+                                    });
+
+                                    var maxLoopElements = new List<AContextMenuElement>
+                                    {
+                                        new LeafElement() { text = "Infinite", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.maxLoops = -1; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "1", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.maxLoops = 1; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "2", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.maxLoops = 2; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "3", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.maxLoops = 3; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "5", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.maxLoops = 5; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "10", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.maxLoops = 10; interp.ResetLoopState(); } } },
+                                    };
+                                    elements.Add(new GroupElement()
+                                    {
+                                        icon = _checkboxCompositeSprite,
+                                        text = "Max Loops",
+                                        elements = maxLoopElements
+                                    });
+
+                                    var enterElements = new List<AContextMenuElement>
+                                    {
+                                        new LeafElement() { text = "Always", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.enterCondition = LoopEnterCondition.Always; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "Manual", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.enterCondition = LoopEnterCondition.Manual; interp.ResetLoopState(); } } },
+                                    };
+                                    elements.Add(new GroupElement()
+                                    {
+                                        icon = _checkboxCompositeSprite,
+                                        text = "Enter Condition",
+                                        elements = enterElements
+                                    });
+
+                                    var exitElements = new List<AContextMenuElement>
+                                    {
+                                        new LeafElement() { text = "Never", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.exitCondition = LoopExitCondition.Never; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "After Max Loops", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.exitCondition = LoopExitCondition.AfterMaxLoops; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "After One Full Loop", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.exitCondition = LoopExitCondition.AtLoopEndOnce; interp.ResetLoopState(); } } },
+                                    };
+                                    elements.Add(new GroupElement()
+                                    {
+                                        icon = _checkboxCompositeSprite,
+                                        text = "Exit Condition",
+                                        elements = exitElements
+                                    });
+
+                                    var exitBehaviorElements = new List<AContextMenuElement>
+                                    {
+                                        new LeafElement() { text = "Continue Global Time", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.exitBehavior = LoopExitBehavior.ContinueGlobalTime; interp.ResetLoopState(); } } },
+                                        new LeafElement() { text = "Hold Last Value", onClick = p => { foreach (var interp in currentlySelectedInterpolables) { interp.exitBehavior = LoopExitBehavior.HoldLastValue; interp.ResetLoopState(); } } },
+                                    };
+                                    elements.Add(new GroupElement()
+                                    {
+                                        icon = _checkboxCompositeSprite,
+                                        text = "After Exit",
+                                        elements = exitBehaviorElements
+                                    });
+                                }
+
                                 elements.Add(new LeafElement()
                                 {
                                     icon = _deleteSprite,
@@ -3049,6 +3314,8 @@ namespace Timeline
         {
             if (t == _playbackTime)
                 return;
+            // Seeking jumps time; reset loop runtime state so enter conditions re-evaluate
+            ResetAllLoopStates();
             _playbackTime = t;
             _startTime = Time.time - _playbackTime;
             bool isPlaying = _isPlaying;
@@ -4303,6 +4570,21 @@ namespace Timeline
 
                     if (interpolableNode.Attributes["alias"] != null)
                         interpolable.alias = interpolableNode.Attributes["alias"].Value;
+
+                    if (interpolableNode.Attributes["loopEnabled"] != null)
+                        interpolable.loopEnabled = XmlConvert.ToBoolean(interpolableNode.Attributes["loopEnabled"].Value);
+                    if (interpolableNode.Attributes["loopStart"] != null)
+                        interpolable.loopStart = XmlConvert.ToSingle(interpolableNode.Attributes["loopStart"].Value);
+                    if (interpolableNode.Attributes["loopEnd"] != null)
+                        interpolable.loopEnd = XmlConvert.ToSingle(interpolableNode.Attributes["loopEnd"].Value);
+                    if (interpolableNode.Attributes["maxLoops"] != null)
+                        interpolable.maxLoops = XmlConvert.ToInt32(interpolableNode.Attributes["maxLoops"].Value);
+                    if (interpolableNode.Attributes["enterCondition"] != null)
+                        interpolable.enterCondition = (LoopEnterCondition)XmlConvert.ToInt32(interpolableNode.Attributes["enterCondition"].Value);
+                    if (interpolableNode.Attributes["exitCondition"] != null)
+                        interpolable.exitCondition = (LoopExitCondition)XmlConvert.ToInt32(interpolableNode.Attributes["exitCondition"].Value);
+                    if (interpolableNode.Attributes["exitBehavior"] != null)
+                        interpolable.exitBehavior = (LoopExitBehavior)XmlConvert.ToInt32(interpolableNode.Attributes["exitBehavior"].Value);
 
                     if (_interpolables.ContainsKey(interpolable.GetHashCode()) == false)
                     {
