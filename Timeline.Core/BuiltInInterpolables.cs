@@ -1,4 +1,4 @@
-﻿using Studio;
+using Studio;
 using System.Collections.Generic;
 using ToolBox.Extensions;
 using UnityEngine;
@@ -25,6 +25,7 @@ namespace Timeline
         public static void Populate()
         {
             Global();
+            LoopConfig();
             EnabledDisabled();
             Animation();
             TranslateRotationScale();
@@ -169,6 +170,41 @@ namespace Timeline
                     writeValueToXml: (parameter, writer, o) => writer.WriteValue("value", (float)o),
                     useOciInHash: false
             ));
+        }
+
+
+        private static void LoopConfig()
+        {
+            // Four independent global tracks: keyframe value is the tag name (string).
+            void AddLoopMarker(string id, string displayName)
+            {
+                Timeline.AddInterpolableModel(new InterpolableModel(
+                        owner: Timeline._ownerId,
+                        id: id,
+                        parameter: null,
+                        name: displayName,
+                        interpolateBefore: null,
+                        interpolateAfter: null,
+                        isCompatibleWithTarget: (oci) => true,
+                        getValue: (oci, parameter) => "",
+                        readValueFromXml: (parameter, node) =>
+                        {
+                            if (node.Attributes != null && node.Attributes["value"] != null)
+                                return node.Attributes["value"].Value ?? "";
+                            return "";
+                        },
+                        writeValueToXml: (parameter, writer, o) =>
+                        {
+                            writer.WriteAttributeString("value", o != null ? o.ToString() : "");
+                        },
+                        useOciInHash: false
+                ));
+            }
+
+            AddLoopMarker(Timeline.LoopFromId, "Loop From (tag)");
+            AddLoopMarker(Timeline.LoopToId, "Loop To (tag)");
+            AddLoopMarker(Timeline.LoopStatId, "Loop Stat (tag)");
+            AddLoopMarker(Timeline.LoopEndId, "Loop End (tag)");
         }
 
         private static void EnabledDisabled()
