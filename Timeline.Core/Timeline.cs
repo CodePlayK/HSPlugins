@@ -231,6 +231,8 @@ namespace Timeline
         private Button _keyframeUseCurrentTimeButton;
         private Text _keyframeValueText;
         private Button _keyframeUseCurrentValueButton;
+        private RectTransform _keyframeTagSelectRoot;
+        private readonly List<Button> _keyframeTagButtons = new List<Button>();
         private Text _keyframeDeleteButtonText;
         private GameObject _headerPrefab;
         private readonly List<HeaderDisplay> _displayedOwnerHeader = new List<HeaderDisplay>();
@@ -1050,6 +1052,27 @@ namespace Timeline
             _keyframeUseCurrentTimeButton = _keyframeWindow.transform.Find("Main Container/Main Fields/Use Current Time").GetComponent<Button>();
             _keyframeValueText = _keyframeWindow.transform.Find("Main Container/Main Fields/Value/Background/Text").GetComponent<Text>();
             _keyframeUseCurrentValueButton = _keyframeWindow.transform.Find("Main Container/Main Fields/Use Current").GetComponent<Button>();
+            // Dynamic tag picker under keyframe value (for loop config tracks)
+            {
+                Transform mainFields = _keyframeWindow.transform.Find("Main Container/Main Fields");
+                GameObject rootGo = new GameObject("TagSelect", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(ContentSizeFitter));
+                rootGo.transform.SetParent(mainFields, false);
+                _keyframeTagSelectRoot = rootGo.GetComponent<RectTransform>();
+                _keyframeTagSelectRoot.SetAsLastSibling();
+                HorizontalLayoutGroup h = rootGo.GetComponent<HorizontalLayoutGroup>();
+                h.childAlignment = TextAnchor.MiddleLeft;
+                h.spacing = 4f;
+                h.padding = new RectOffset(4, 4, 2, 2);
+                h.childControlWidth = false;
+                h.childControlHeight = true;
+                h.childForceExpandWidth = false;
+                h.childForceExpandHeight = true;
+                ContentSizeFitter csf = rootGo.GetComponent<ContentSizeFitter>();
+                csf.horizontalFit = ContentSizeFitter.FitMode.PreferredSize;
+                csf.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+                rootGo.SetActive(false);
+            }
+
             Button deleteButton = _keyframeWindow.transform.Find("Main Container/Main Fields/Delete").GetComponent<Button>();
             _keyframeDeleteButtonText = deleteButton.GetComponentInChildren<Text>();
 
@@ -3147,81 +3170,9 @@ namespace Timeline
                                             {
                                                 KeyValuePair<float, Keyframe> kPair = display.keyframe.parent.keyframes.First(k => k.Value == display.keyframe);
                                                 SeekPlaybackTime(kPair.Key);
-
                                                 if (_selectedKeyframes.Count == 0 || _selectedKeyframes.Any(k => k.Value == display.keyframe) == false)
                                                     SelectKeyframes(kPair);
-
-                                                List<AContextMenuElement> kfElements = new List<AContextMenuElement>();
-                                                bool isLoopCfg = display.keyframe.parent.IsLoopConfigTrack();
-
-                                                if (isLoopCfg == false)
-                                                {
-                                                    kfElements.Add(new LeafElement()
-                                                    {
-                                                        text = "(Tag list only on Loop From/To/Stat/End tracks)",
-                                                        onClick = p => { LoopLog("Right-clicked keyframe on non-loop-config track id=" + display.keyframe.parent.id); }
-                                                    });
-                                                }
-                                                else
-                                                {
-                                                    List<string> allTags = CollectAllTrackTags();
-                                                    if (allTags.Count == 0)
-                                                    {
-                                                        kfElements.Add(new LeafElement()
-                                                        {
-                                                            text = "(No tags — Edit Tags on a business track first)",
-                                                            onClick = p => { LoopLog("Cannot set keyframe tag: no tags on business tracks."); }
-                                                        });
-                                                    }
-                                                    else
-                                                    {
-                                                        string current = display.keyframe.value as string ?? "";
-                                                        foreach (string t in allTags)
-                                                        {
-                                                            string tagCopy = t;
-                                                            string label = tagCopy;
-                                                            if (Interpolable.NormalizeTag(current) == tagCopy)
-                                                                label = tagCopy + "  ✓";
-                                                            kfElements.Add(new LeafElement()
-                                                            {
-                                                                text = label,
-                                                                onClick = p =>
-                                                                {
-                                                                    foreach (KeyValuePair<float, Keyframe> sel in _selectedKeyframes)
-                                                                    {
-                                                                        if (sel.Value.parent.IsLoopConfigTrack())
-                                                                            sel.Value.value = tagCopy;
-                                                                    }
-                                                                    LoopLog("Keyframe tag set to [" + tagCopy + "] at t=" + kPair.Key.ToString("0.###"));
-                                                                    UpdateKeyframeWindow(true);
-                                                                    UpdateGrid();
-                                                                }
-                                                            });
-                                                        }
-                                                    }
-                                                    kfElements.Add(new LeafElement()
-                                                    {
-                                                        text = "Clear Tag",
-                                                        onClick = p =>
-                                                        {
-                                                            foreach (KeyValuePair<float, Keyframe> sel in _selectedKeyframes)
-                                                            {
-                                                                if (sel.Value.parent.IsLoopConfigTrack())
-                                                                    sel.Value.value = "";
-                                                            }
-                                                            LoopLog("Keyframe tag cleared at t=" + kPair.Key.ToString("0.###"));
-                                                            UpdateKeyframeWindow(true);
-                                                            UpdateGrid();
-                                                        }
-                                                    });
-                                                }
-
-                                                Vector2 lp;
-                                                RectTransform uiRt = (RectTransform)_ui.transform;
-                                                if (RectTransformUtility.ScreenPointToLocalPointInRectangle(uiRt, e.position, e.pressEventCamera, out lp) == false)
-                                                    RectTransformUtility.ScreenPointToLocalPointInRectangle(uiRt, e.position, null, out lp);
-                                                UIUtility.ShowContextMenu(_ui, lp, kfElements, 260);
-                                                LoopLogDebug("Keyframe context menu shown (loopCfg=" + isLoopCfg + ", tags=" + CollectAllTrackTags().Count + ")");
+                                                // Tag is chosen in the Keyframe Window (not a context menu)
                                             }
                                             break;
                                         case PointerEventData.InputButton.Middle:
@@ -3930,6 +3881,25 @@ namespace Timeline
 
         private void UseCurrentValue()
         {
+            if (_selectedKeyframes.Count > 0 && _selectedKeyframes.All(k => k.Value.parent.IsLoopConfigTrack()))
+            {
+                // Loop config: cycle to next registered tag instead of GetValue()
+                List<string> tags = CollectAllTrackTags();
+                if (tags.Count == 0)
+                {
+                    LoopLog("Use Current: no tags on business tracks");
+                    return;
+                }
+                string cur = Interpolable.NormalizeTag(_selectedKeyframes[0].Value.value as string ?? "");
+                int idx = tags.IndexOf(cur);
+                string next = tags[(idx + 1) % tags.Count];
+                foreach (KeyValuePair<float, Keyframe> pair in _selectedKeyframes)
+                    pair.Value.value = next;
+                LoopLog("Use Current cycled tag to [" + next + "]");
+                UpdateKeyframeValueText();
+                return;
+            }
+
             foreach (KeyValuePair<float, Keyframe> pair in _selectedKeyframes)
                 pair.Value.value = pair.Value.parent.GetValue();
             UpdateKeyframeValueText();
@@ -4434,16 +4404,117 @@ namespace Timeline
             object v = _selectedKeyframes[0].Value.value;
             foreach (KeyValuePair<float, Keyframe> pair in _selectedKeyframes)
             {
-                if (v.Equals(pair.Value.value) == false)
+                if (v == null && pair.Value.value == null)
+                    continue;
+                if (v == null || pair.Value.value == null || v.Equals(pair.Value.value) == false)
                 {
                     _keyframeValueText.text = "Multiple values";
+                    RebuildKeyframeTagSelectUI();
                     return;
                 }
             }
             _keyframeValueText.text = v != null ? v.ToString() : "null";
+            RebuildKeyframeTagSelectUI();
         }
 
-        private void UpdateCurve()
+        private void RebuildKeyframeTagSelectUI()
+        {
+            if (_keyframeTagSelectRoot == null)
+                return;
+
+            bool allLoopCfg = _selectedKeyframes.Count > 0 && _selectedKeyframes.All(k => k.Value.parent.IsLoopConfigTrack());
+            _keyframeTagSelectRoot.gameObject.SetActive(allLoopCfg);
+            if (allLoopCfg == false)
+                return;
+
+            List<string> tags = CollectAllTrackTags();
+            string current = _selectedKeyframes[0].Value.value as string ?? "";
+            current = Interpolable.NormalizeTag(current);
+
+            // Ensure enough buttons: Clear + tags
+            int need = tags.Count + 1;
+            while (_keyframeTagButtons.Count < need)
+            {
+                GameObject btnGo = new GameObject("TagBtn", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
+                btnGo.transform.SetParent(_keyframeTagSelectRoot, false);
+                Image img = btnGo.GetComponent<Image>();
+                img.color = new Color(0.2f, 0.2f, 0.25f, 0.95f);
+                GameObject labelGo = new GameObject("Text", typeof(RectTransform), typeof(Text));
+                labelGo.transform.SetParent(btnGo.transform, false);
+                Text label = labelGo.GetComponent<Text>();
+                label.alignment = TextAnchor.MiddleCenter;
+                label.color = Color.white;
+                label.fontSize = 14;
+                label.raycastTarget = false;
+                if (_keyframeValueText != null && _keyframeValueText.font != null)
+                    label.font = _keyframeValueText.font;
+                RectTransform lrt = label.rectTransform;
+                lrt.anchorMin = Vector2.zero;
+                lrt.anchorMax = Vector2.one;
+                lrt.offsetMin = Vector2.zero;
+                lrt.offsetMax = Vector2.zero;
+                LayoutElement le = btnGo.GetComponent<LayoutElement>();
+                le.preferredHeight = 22f;
+                le.preferredWidth = 72f;
+                _keyframeTagButtons.Add(btnGo.GetComponent<Button>());
+            }
+
+            for (int i = 0; i < _keyframeTagButtons.Count; i++)
+            {
+                Button btn = _keyframeTagButtons[i];
+                if (i >= need)
+                {
+                    btn.gameObject.SetActive(false);
+                    continue;
+                }
+                btn.gameObject.SetActive(true);
+                Text label = btn.GetComponentInChildren<Text>();
+                btn.onClick = new Button.ButtonClickedEvent();
+                if (i == 0)
+                {
+                    label.text = "Clear";
+                    btn.GetComponent<Image>().color = new Color(0.35f, 0.15f, 0.15f, 0.95f);
+                    btn.onClick.AddListener(() =>
+                    {
+                        foreach (KeyValuePair<float, Keyframe> sel in _selectedKeyframes)
+                        {
+                            if (sel.Value.parent.IsLoopConfigTrack())
+                                sel.Value.value = "";
+                        }
+                        LoopLog("Keyframe tag cleared via Keyframe Window");
+                        UpdateKeyframeValueText();
+                        UpdateGrid();
+                    });
+                }
+                else
+                {
+                    string tagCopy = tags[i - 1];
+                    bool selected = current == tagCopy;
+                    label.text = selected ? tagCopy + "*" : tagCopy;
+                    btn.GetComponent<Image>().color = selected
+                        ? new Color(0.15f, 0.4f, 0.25f, 0.95f)
+                        : new Color(0.2f, 0.2f, 0.25f, 0.95f);
+                    LayoutElement le = btn.GetComponent<LayoutElement>();
+                    le.preferredWidth = Mathf.Max(72f, 12f * tagCopy.Length + 16f);
+                    btn.onClick.AddListener(() =>
+                    {
+                        foreach (KeyValuePair<float, Keyframe> sel in _selectedKeyframes)
+                        {
+                            if (sel.Value.parent.IsLoopConfigTrack())
+                                sel.Value.value = tagCopy;
+                        }
+                        LoopLog("Keyframe tag set to [" + tagCopy + "] via Keyframe Window");
+                        UpdateKeyframeValueText();
+                        UpdateGrid();
+                    });
+                }
+            }
+
+            if (tags.Count == 0)
+                _keyframeValueText.text = "(No tags — Edit Tags on a business track first)";
+        }
+
+        private void         private void UpdateCurve()
         {
             if (_selectedKeyframes.Count == 0)
                 return;
@@ -4942,8 +5013,11 @@ namespace Timeline
 
                     string id = interpolableNode.Attributes["id"].Value;
                     InterpolableModel model = _interpolableModelsList.Find(i => i.owner == ownerId && i.id == id);
-                    if (model == null /*|| model.isCompatibleWithTarget(oci) == false*/) //todo Might need to get this back on in the future, depending on how things end up going; add logging for discarded entries?
+                    if (model == null)
+                    {
+                        Logger.LogMessage("[Loop] Load skipped: unknown interpolable model owner=" + ownerId + " id=" + id);
                         return;
+                    }
                     if (model.readParameterFromXml != null)
                         interpolable = new Interpolable(oci, model.readParameterFromXml(oci, interpolableNode), model);
                     else
@@ -4967,43 +5041,50 @@ namespace Timeline
                         interpolable.SetTagsFromString(interpolableNode.Attributes["tag"].Value ?? "");
                     // legacy single-track loopScale ignored; scales are per-tag in tagScales
 
-                    if (_interpolables.ContainsKey(interpolable.GetHashCode()) == false)
+                    int hash = interpolable.GetHashCode();
+                    if (_interpolables.ContainsKey(hash) == false)
                     {
-                        _interpolables.Add(interpolable.GetHashCode(), interpolable);
+                        _interpolables.Add(hash, interpolable);
                         _interpolablesTree.AddLeaf(interpolable, group);
                         added = true;
-                        foreach (XmlNode keyframeNode in interpolableNode.ChildNodes)
-                        {
-                            if (keyframeNode.Name == "keyframe")
-                            {
-                                float time = XmlConvert.ToSingle(keyframeNode.Attributes["time"].Value);
-
-                                object value = interpolable.ReadValueFromXml(keyframeNode);
-                                List<UnityEngine.Keyframe> curveKeys = new List<UnityEngine.Keyframe>();
-                                foreach (XmlNode curveKeyNode in keyframeNode.ChildNodes)
-                                {
-                                    if (curveKeyNode.Name == "curveKeyframe")
-                                    {
-                                        UnityEngine.Keyframe curveKey = new UnityEngine.Keyframe(
-                                                XmlConvert.ToSingle(curveKeyNode.Attributes["time"].Value),
-                                                XmlConvert.ToSingle(curveKeyNode.Attributes["value"].Value),
-                                                XmlConvert.ToSingle(curveKeyNode.Attributes["inTangent"].Value),
-                                                XmlConvert.ToSingle(curveKeyNode.Attributes["outTangent"].Value));
-                                        curveKeys.Add(curveKey);
-                                    }
-                                }
-
-                                AnimationCurve curve;
-                                if (curveKeys.Count == 0)
-                                    curve = AnimationCurve.Linear(0f, 0f, 1f, 1f);
-                                else
-                                    curve = new AnimationCurve(curveKeys.ToArray());
-
-                                Keyframe keyframe = new Keyframe(value, interpolable, curve);
-                                interpolable.keyframes.Add(time, keyframe);
-                            }
-                        }
                     }
+                    else
+                    {
+                        // Reuse existing leaf (same model hash); still load keyframes into it
+                        interpolable = _interpolables[hash];
+                        LoopLogDebug("Load: reusing existing interpolable hash for id=" + interpolable.id);
+                    }
+
+                    foreach (XmlNode keyframeNode in interpolableNode.ChildNodes)
+                    {
+                        if (keyframeNode.Name != "keyframe")
+                            continue;
+                        float time = XmlConvert.ToSingle(keyframeNode.Attributes["time"].Value);
+                        object value = interpolable.ReadValueFromXml(keyframeNode);
+                        List<UnityEngine.Keyframe> curveKeys = new List<UnityEngine.Keyframe>();
+                        foreach (XmlNode curveKeyNode in keyframeNode.ChildNodes)
+                        {
+                            if (curveKeyNode.Name != "curveKeyframe")
+                                continue;
+                            UnityEngine.Keyframe curveKey = new UnityEngine.Keyframe(
+                                    XmlConvert.ToSingle(curveKeyNode.Attributes["time"].Value),
+                                    XmlConvert.ToSingle(curveKeyNode.Attributes["value"].Value),
+                                    XmlConvert.ToSingle(curveKeyNode.Attributes["inTangent"].Value),
+                                    XmlConvert.ToSingle(curveKeyNode.Attributes["outTangent"].Value));
+                            curveKeys.Add(curveKey);
+                        }
+
+                        AnimationCurve curve = curveKeys.Count == 0
+                            ? AnimationCurve.Linear(0f, 0f, 1f, 1f)
+                            : new AnimationCurve(curveKeys.ToArray());
+
+                        if (interpolable.keyframes.ContainsKey(time))
+                            interpolable.keyframes.Remove(time);
+                        interpolable.keyframes.Add(time, new Keyframe(value, interpolable, curve));
+                    }
+
+                    if (interpolable.IsLoopConfigTrack())
+                        LoopLog("Loaded loop config id=" + interpolable.id + " keyframes=" + interpolable.keyframes.Count);
                 }
             }
             catch (Exception e)
@@ -5075,7 +5156,10 @@ namespace Timeline
                         return;
                     }
                 }
-                writer.WriteRaw(stream.ToString());
+                string raw = stream.ToString();
+                if (interpolable.IsLoopConfigTrack())
+                    LoopLogDebug("Saved loop config track id=" + interpolable.id + " keyframes=" + interpolable.keyframes.Count + " xmlLen=" + raw.Length);
+                writer.WriteRaw(raw);
             }
         }
 
