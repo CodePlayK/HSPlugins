@@ -2601,7 +2601,7 @@ namespace Timeline
                                                     if (interp.AddTag(s))
                                                         count++;
                                                 });
-                                                LoopLog("Group add tag "" + Interpolable.NormalizeTag(s) + "" applied to " + count + " track(s)");
+                                                LoopLog("Group add tag [" + Interpolable.NormalizeTag(s) + "] applied to " + count + " track(s)");
                                                 display.inputField.gameObject.SetActive(false);
                                                 UpdateInterpolablesView();
                                             });
