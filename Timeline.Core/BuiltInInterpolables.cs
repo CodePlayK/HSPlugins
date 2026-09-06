@@ -183,19 +183,25 @@ namespace Timeline
                         id: id,
                         parameter: null,
                         name: displayName,
-                        interpolateBefore: null,
+                        // no-op so canInterpolateBefore is true (consistent with other tracks)
+                        interpolateBefore: (oci, parameter, leftValue, rightValue, factor) => { },
                         interpolateAfter: null,
                         isCompatibleWithTarget: (oci) => true,
                         getValue: (oci, parameter) => "",
                         readValueFromXml: (parameter, node) =>
                         {
+                            // Prefer attribute, fallback to child <value> element
                             if (node.Attributes != null && node.Attributes["value"] != null)
                                 return node.Attributes["value"].Value ?? "";
+                            XmlNode child = node.SelectSingleNode("value");
+                            if (child != null)
+                                return child.InnerText ?? "";
                             return "";
                         },
                         writeValueToXml: (parameter, writer, o) =>
                         {
-                            writer.WriteAttributeString("value", o != null ? o.ToString() : "");
+                            string s = o != null ? o.ToString() : "";
+                            writer.WriteAttributeString("value", s);
                         },
                         useOciInHash: false
                 ));
