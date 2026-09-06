@@ -1270,25 +1270,6 @@ namespace Timeline
             Logger.LogDebug("[Loop] " + message);
         }
 
-        private float GetTagLoopScale(string tag)
-        {
-            string n = Interpolable.NormalizeTag(tag);
-            float scale;
-            if (_tagLoopScales.TryGetValue(n, out scale) == false || scale <= 0f)
-                return 1f;
-            return scale;
-        }
-
-        private void SetTagLoopScale(string tag, float scale)
-        {
-            string n = Interpolable.NormalizeTag(tag);
-            if (n.Length == 0)
-                return;
-            if (scale <= 0f)
-                scale = 1f;
-            _tagLoopScales[n] = scale;
-            LoopLog("Tag scale set: \"" + n + "\" = " + scale.ToString("0.###"));
-        }
 
         /// <summary>
         /// Union of all business-track tags (config tracks do not contribute).
@@ -1479,7 +1460,6 @@ namespace Timeline
 
             if (active.Count > 1)
             {
-                // Forbidden: conflict -> ignore loop, use global time
                 if (Time.unscaledTime - _lastConflictLogTime > 1f)
                 {
                     _lastConflictLogTime = Time.unscaledTime;
@@ -1490,52 +1470,38 @@ namespace Timeline
 
             string chosen = active[0];
             TagLoopRegion reg = regions[chosen];
-            float tagScale = GetTagLoopScale(chosen);
-            float mainScale = EvaluateMainTimeScaleAt(globalTime);
-            float finalScale = tagScale * mainScale;
-            float duration = reg.to - reg.from;
-            if (duration <= 0f)
+            float D = reg.to - reg.from;
+            if (D <= 1e-8f)
             {
                 sampleTime = reg.from;
                 loopFrom = reg.from;
                 loopTo = reg.to;
                 return true;
             }
-            // Variable-rate consistent accumulation: tagScale * integral of mainScale over [stat, T]
-            float integrated = IntegrateMainTimeScale(activeStat[chosen], globalTime);
-            float elapsed = tagScale * integrated;
-            float mod = elapsed % duration;
-            if (mod < 0f)
-                mod += duration;
 
-            sampleTime = reg.from + mod;
+            // Main axis progress (timeScale along global timeline). When main scale ≡ 1 → (T - stat).
+            float progress = IntegrateMainTimeScale(activeStat[chosen], globalTime);
+            if (progress < 0f)
+                progress = 0f;
+
+            // Map progress through [from,to] using 1/L density so content matches playing that region
+            // (L = timeScale track inside [from,to], with curves). L≡1 → phase = progress % D.
+            float phase = MapProgressThroughLoopRegion(reg.from, D, progress);
+            sampleTime = reg.from + phase;
             loopFrom = reg.from;
             loopTo = reg.to;
             return true;
         }
 
         /// <summary>
-        /// Main timescale at timeline time T (timeScale track if present, else Time.timeScale).
+        /// timeScale track value at axis time t (curves respected). No track → 1.
+        /// Does not fall back to Unity Time.timeScale (loop content baseline is the track in [from,to]).
         /// </summary>
-        private float EvaluateMainTimeScaleAt(float globalTime)
+        private float EvaluateTimeScaleTrackAt(float globalTime)
         {
-            Interpolable tsTrack = null;
-            foreach (Interpolable interp in _interpolables.Values)
-            {
-                if (interp.enabled && interp.id == "timeScale")
-                {
-                    tsTrack = interp;
-                    break;
-                }
-            }
-
+            Interpolable tsTrack = FindTimeScaleTrack();
             if (tsTrack == null || tsTrack.keyframes.Count == 0)
-            {
-                float s = Time.timeScale;
-                if (_isPlaying == false && s <= 0f)
-                    return 1f;
-                return s < 0f ? 0f : s;
-            }
+                return 1f;
 
             KeyValuePair<float, Keyframe> left = default(KeyValuePair<float, Keyframe>);
             KeyValuePair<float, Keyframe> right = default(KeyValuePair<float, Keyframe>);
@@ -1553,44 +1519,55 @@ namespace Timeline
             if (left.Value == null && right.Value == null)
                 return 1f;
             if (left.Value == null)
-                return System.Convert.ToSingle(right.Value.value);
+                return Mathf.Max(1e-4f, System.Convert.ToSingle(right.Value.value));
             if (right.Value == null)
-                return System.Convert.ToSingle(left.Value.value);
+                return Mathf.Max(1e-4f, System.Convert.ToSingle(left.Value.value));
 
             float span = right.Key - left.Key;
             float nt = span <= 1e-12f ? 0f : (globalTime - left.Key) / span;
             nt = left.Value.curve.Evaluate(nt);
             float lv = System.Convert.ToSingle(left.Value.value);
             float rv = System.Convert.ToSingle(right.Value.value);
-            float v = Mathf.LerpUnclamped(lv, rv, nt);
-            return v < 0f ? 0f : v;
+            return Mathf.Max(1e-4f, Mathf.LerpUnclamped(lv, rv, nt));
         }
 
         /// <summary>
-        /// Integrate main timescale over timeline axis [a, b] (piecewise using timeScale keys).
+        /// Main timescale along global axis for progress accumulation.
+        /// Prefer timeScale track; else Unity Time.timeScale (Speed). Paused scrub → 1.
         /// </summary>
+        private float EvaluateMainTimeScaleAt(float globalTime)
+        {
+            Interpolable tsTrack = FindTimeScaleTrack();
+            if (tsTrack != null && tsTrack.keyframes.Count > 0)
+                return EvaluateTimeScaleTrackAt(globalTime);
+
+            float s = Time.timeScale;
+            if (_isPlaying == false && s <= 0f)
+                return 1f;
+            if (s <= 0f)
+                return 0f;
+            return s;
+        }
+
+        private Interpolable FindTimeScaleTrack()
+        {
+            foreach (Interpolable interp in _interpolables.Values)
+            {
+                if (interp.enabled && interp.id == "timeScale")
+                    return interp;
+            }
+            return null;
+        }
+
         private float IntegrateMainTimeScale(float a, float b)
         {
             if (b <= a)
                 return 0f;
 
-            Interpolable tsTrack = null;
-            foreach (Interpolable interp in _interpolables.Values)
-            {
-                if (interp.enabled && interp.id == "timeScale")
-                {
-                    tsTrack = interp;
-                    break;
-                }
-            }
-
+            Interpolable tsTrack = FindTimeScaleTrack();
             if (tsTrack == null || tsTrack.keyframes.Count == 0)
-            {
-                float s = EvaluateMainTimeScaleAt(a);
-                return s * (b - a);
-            }
+                return EvaluateMainTimeScaleAt(a) * (b - a);
 
-            // Build sorted sample points: a, b, and all key times in between
             var points = new List<float>();
             points.Add(a);
             points.Add(b);
@@ -1600,7 +1577,6 @@ namespace Timeline
                     points.Add(kf.Key);
             }
             points.Sort();
-            // unique
             for (int i = points.Count - 1; i > 0; i--)
             {
                 if (Mathf.Abs(points[i] - points[i - 1]) < 1e-7f)
@@ -1616,7 +1592,6 @@ namespace Timeline
                 float seg = t1 - t0;
                 if (seg <= 0f)
                     continue;
-                // Simpson-like samples inside segment
                 float acc = 0f;
                 for (int s = 0; s <= subSteps; s++)
                 {
@@ -1627,6 +1602,56 @@ namespace Timeline
                 sum += (acc / subSteps) * seg;
             }
             return sum;
+        }
+
+        /// <summary>
+        /// G(phase) = ∫_0^phase ds / L(from+s). Invert G(phase) = progress % G(D).
+        /// L from timeScale track inside loop region (curves). L≡1 → phase = progress % D.
+        /// Higher L in region → faster phase advance (matches faster play-through of that region).
+        /// </summary>
+        private float MapProgressThroughLoopRegion(float from, float D, float progress)
+        {
+            float gD = IntegrateInvTimeScaleInRegion(from, D, D);
+            if (gD <= 1e-12f)
+                return 0f;
+
+            float target = progress % gD;
+            if (target < 0f)
+                target += gD;
+
+            // Binary search phase in [0, D]
+            float lo = 0f, hi = D;
+            for (int i = 0; i < 40; i++)
+            {
+                float mid = 0.5f * (lo + hi);
+                float g = IntegrateInvTimeScaleInRegion(from, D, mid);
+                if (g < target)
+                    lo = mid;
+                else
+                    hi = mid;
+            }
+            return 0.5f * (lo + hi);
+        }
+
+        private float IntegrateInvTimeScaleInRegion(float from, float D, float phase)
+        {
+            phase = Mathf.Clamp(phase, 0f, D);
+            if (phase <= 1e-12f)
+                return 0f;
+
+            const int steps = 32;
+            float sum = 0f;
+            for (int s = 0; s <= steps; s++)
+            {
+                float p = phase * (s / (float)steps);
+                float u = from + p;
+                float L = EvaluateTimeScaleTrackAt(u);
+                if (L < 1e-4f)
+                    L = 1e-4f;
+                float w = (s == 0 || s == steps) ? 0.5f : 1f;
+                sum += w / L;
+            }
+            return (sum / steps) * phase;
         }
 
         private const float BakeTimeEpsilon = 1e-4f;
@@ -1702,7 +1727,6 @@ namespace Timeline
                 return;
             }
 
-            float tagScale = GetTagLoopScale(tag);
             float D = region.to - region.from;
             if (D <= 1e-8f)
             {
@@ -1829,14 +1853,16 @@ namespace Timeline
                 {
                     float stat = w.Key;
                     float end = w.Value;
-                    float maxIntegrated = IntegrateMainTimeScale(stat, end);
-                    float maxElapsed = tagScale * maxIntegrated;
+                    float maxProgress = IntegrateMainTimeScale(stat, end);
+                    float gD = IntegrateInvTimeScaleInRegion(region.from, D, D);
+                    if (gD <= 1e-12f) gD = D;
+                    float maxElapsed = maxProgress;
                     if (maxElapsed <= 0f)
                     {
                         LoopLog("Bake track \"" + trackName + "\": zero integrated scale in window, skip window.");
                         continue;
                     }
-                    int maxN = Mathf.FloorToInt(maxElapsed / D) + 2;
+                    int maxN = Mathf.FloorToInt(maxElapsed / gD) + 2;
 
                     foreach (KeyValuePair<float, Keyframe> src in source)
                     {
@@ -1845,14 +1871,15 @@ namespace Timeline
                             phase = 0f;
                         if (phase >= D)
                             phase = phase % D;
+                        float gPhase = IntegrateInvTimeScaleInRegion(region.from, D, phase);
 
                         for (int n = 0; n <= maxN; n++)
                         {
-                            float targetElapsed = phase + n * D;
+                            float targetElapsed = gPhase + n * gD;
                             if (targetElapsed > maxElapsed + BakeTimeEpsilon)
                                 break;
                             float T;
-                            if (TrySolveBakeTime(stat, end, tagScale, targetElapsed, out T) == false)
+                            if (TrySolveBakeTime(stat, end, targetElapsed, out T) == false)
                                 continue;
                             if (T < stat - BakeTimeEpsilon || T > end + BakeTimeEpsilon)
                                 continue;
@@ -1905,14 +1932,14 @@ namespace Timeline
         }
 
         /// <summary>
-        /// Solve tagScale * IntegrateMainTimeScale(stat, T) = targetElapsed for T in [stat, end].
+        /// Solve IntegrateMainTimeScale(stat, T) = targetProgress for T in [stat, end].
         /// </summary>
-        private bool TrySolveBakeTime(float stat, float end, float tagScale, float targetElapsed, out float resultT)
+        private bool TrySolveBakeTime(float stat, float end, float targetProgress, out float resultT)
         {
             resultT = stat;
-            if (tagScale <= 0f || targetElapsed < -BakeTimeEpsilon)
+            if (targetProgress < -BakeTimeEpsilon)
                 return false;
-            if (targetElapsed <= BakeTimeEpsilon)
+            if (targetProgress <= BakeTimeEpsilon)
             {
                 resultT = stat;
                 return true;
@@ -1920,16 +1947,15 @@ namespace Timeline
 
             float lo = stat;
             float hi = end;
-            float fHi = tagScale * IntegrateMainTimeScale(stat, hi);
-            if (fHi < targetElapsed - BakeTimeEpsilon)
+            float fHi = IntegrateMainTimeScale(stat, hi);
+            if (fHi < targetProgress - BakeTimeEpsilon)
                 return false;
 
-            // Binary search
             for (int i = 0; i < 48; i++)
             {
                 float mid = 0.5f * (lo + hi);
-                float fMid = tagScale * IntegrateMainTimeScale(stat, mid);
-                if (fMid < targetElapsed)
+                float fMid = IntegrateMainTimeScale(stat, mid);
+                if (fMid < targetProgress)
                     lo = mid;
                 else
                     hi = mid;
@@ -2812,46 +2838,6 @@ namespace Timeline
                                             UpdateInterpolablesView();
                                         }
                                     });
-
-                                    // Tag loop scale (per tag, not per track)
-                                    {
-                                        var scaleLeaves = new List<AContextMenuElement>();
-                                        foreach (string t in CollectAllTrackTags())
-                                        {
-                                            string tagCopy = t;
-                                            float cur = GetTagLoopScale(tagCopy);
-                                            scaleLeaves.Add(new LeafElement()
-                                            {
-                                                text = tagCopy + " (" + cur.ToString("0.###") + ")",
-                                                onClick = p =>
-                                                {
-                                                    display.inputField.gameObject.SetActive(true);
-                                                    display.inputField.onEndEdit = new InputField.SubmitEvent();
-                                                    display.inputField.text = cur.ToString("0.###");
-                                                    display.inputField.onEndEdit.AddListener(s =>
-                                                    {
-                                                        float scale;
-                                                        if (float.TryParse(s, out scale) == false || scale <= 0f)
-                                                            scale = 1f;
-                                                        SetTagLoopScale(tagCopy, scale);
-                                                        LoopLog("UI: set tag loop scale [" + tagCopy + "] = " + scale.ToString("0.###"));
-                                                        display.inputField.gameObject.SetActive(false);
-                                                    });
-                                                    display.inputField.ActivateInputField();
-                                                    display.inputField.Select();
-                                                }
-                                            });
-                                        }
-                                        if (scaleLeaves.Count > 0)
-                                        {
-                                            elements.Add(new GroupElement()
-                                            {
-                                                icon = _checkboxCompositeSprite,
-                                                text = "Tag Loop Scale",
-                                                elements = scaleLeaves
-                                            });
-                                        }
-                                    }
 
                                     // Bake loop → real keyframes
                                     {
