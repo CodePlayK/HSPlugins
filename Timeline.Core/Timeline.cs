@@ -1052,24 +1052,43 @@ namespace Timeline
             _keyframeUseCurrentTimeButton = _keyframeWindow.transform.Find("Main Container/Main Fields/Use Current Time").GetComponent<Button>();
             _keyframeValueText = _keyframeWindow.transform.Find("Main Container/Main Fields/Value/Background/Text").GetComponent<Text>();
             _keyframeUseCurrentValueButton = _keyframeWindow.transform.Find("Main Container/Main Fields/Use Current").GetComponent<Button>();
-            // Dynamic tag picker under keyframe value (for loop config tracks)
+            // Tag picker: 2-column grid under Value (avoids clipping by curve panel)
             {
                 Transform mainFields = _keyframeWindow.transform.Find("Main Container/Main Fields");
-                GameObject rootGo = new GameObject("TagSelect", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(ContentSizeFitter));
+                GameObject rootGo = new GameObject("TagSelect", typeof(RectTransform), typeof(GridLayoutGroup), typeof(ContentSizeFitter), typeof(LayoutElement));
                 rootGo.transform.SetParent(mainFields, false);
                 _keyframeTagSelectRoot = rootGo.GetComponent<RectTransform>();
-                _keyframeTagSelectRoot.SetAsLastSibling();
-                HorizontalLayoutGroup h = rootGo.GetComponent<HorizontalLayoutGroup>();
-                h.childAlignment = TextAnchor.MiddleLeft;
-                h.spacing = 4f;
-                h.padding = new RectOffset(4, 4, 2, 2);
-                h.childControlWidth = false;
-                h.childControlHeight = true;
-                h.childForceExpandWidth = false;
-                h.childForceExpandHeight = true;
+
+                Transform valueTf = mainFields.Find("Value");
+                if (valueTf != null)
+                    _keyframeTagSelectRoot.SetSiblingIndex(valueTf.GetSiblingIndex() + 1);
+                else
+                    _keyframeTagSelectRoot.SetAsLastSibling();
+
+                GridLayoutGroup grid = rootGo.GetComponent<GridLayoutGroup>();
+                grid.cellSize = new Vector2(88f, 24f);
+                grid.spacing = new Vector2(4f, 4f);
+                grid.startCorner = GridLayoutGroup.Corner.UpperLeft;
+                grid.startAxis = GridLayoutGroup.Axis.Horizontal;
+                grid.childAlignment = TextAnchor.UpperLeft;
+                grid.constraint = GridLayoutGroup.Constraint.FixedColumnCount;
+                grid.constraintCount = 2;
+                grid.padding = new RectOffset(2, 2, 2, 2);
+
                 ContentSizeFitter csf = rootGo.GetComponent<ContentSizeFitter>();
-                csf.horizontalFit = ContentSizeFitter.FitMode.PreferredSize;
+                csf.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
                 csf.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+                LayoutElement rootLe = rootGo.GetComponent<LayoutElement>();
+                rootLe.minHeight = 28f;
+                rootLe.preferredHeight = 28f;
+                rootLe.flexibleWidth = 1f;
+
+                _keyframeTagSelectRoot.anchorMin = new Vector2(0f, 1f);
+                _keyframeTagSelectRoot.anchorMax = new Vector2(1f, 1f);
+                _keyframeTagSelectRoot.pivot = new Vector2(0.5f, 1f);
+                _keyframeTagSelectRoot.sizeDelta = new Vector2(0f, 28f);
+
                 rootGo.SetActive(false);
             }
 
@@ -4454,8 +4473,10 @@ namespace Timeline
                 lrt.offsetMin = Vector2.zero;
                 lrt.offsetMax = Vector2.zero;
                 LayoutElement le = btnGo.GetComponent<LayoutElement>();
-                le.preferredHeight = 22f;
-                le.preferredWidth = 72f;
+                le.preferredHeight = 24f;
+                le.preferredWidth = 88f;
+                le.minWidth = 88f;
+                le.minHeight = 24f;
                 _keyframeTagButtons.Add(btnGo.GetComponent<Button>());
             }
 
@@ -4494,8 +4515,6 @@ namespace Timeline
                     btn.GetComponent<Image>().color = selected
                         ? new Color(0.15f, 0.4f, 0.25f, 0.95f)
                         : new Color(0.2f, 0.2f, 0.25f, 0.95f);
-                    LayoutElement le = btn.GetComponent<LayoutElement>();
-                    le.preferredWidth = Mathf.Max(72f, 12f * tagCopy.Length + 16f);
                     btn.onClick.AddListener(() =>
                     {
                         foreach (KeyValuePair<float, Keyframe> sel in _selectedKeyframes)
@@ -4512,6 +4531,21 @@ namespace Timeline
 
             if (tags.Count == 0)
                 _keyframeValueText.text = "(No tags — Edit Tags on a business track first)";
+
+            int cols = 2;
+            int rows = Mathf.Max(1, (need + cols - 1) / cols);
+            float height = rows * 24f + (rows - 1) * 4f + 8f;
+            LayoutElement rootLe = _keyframeTagSelectRoot.GetComponent<LayoutElement>();
+            if (rootLe != null)
+            {
+                rootLe.minHeight = height;
+                rootLe.preferredHeight = height;
+            }
+            _keyframeTagSelectRoot.sizeDelta = new Vector2(_keyframeTagSelectRoot.sizeDelta.x, height);
+            LayoutRebuilder.ForceRebuildLayoutImmediate(_keyframeTagSelectRoot);
+            RectTransform mainFieldsRt = _keyframeTagSelectRoot.parent as RectTransform;
+            if (mainFieldsRt != null)
+                LayoutRebuilder.ForceRebuildLayoutImmediate(mainFieldsRt);
         }
 
         private void UpdateCurve()
