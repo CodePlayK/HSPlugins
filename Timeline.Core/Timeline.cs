@@ -1711,7 +1711,6 @@ namespace Timeline
 
         private void SaveSceneBeforeBake()
         {
-            LoopLog("Bake: auto-saving timeline data before baking (please also Ctrl+S scene if needed)...");
             try
             {
 #if KOIKATSU || AISHOUJO || HONEYSELECT2 || SUNSHINE
@@ -1727,9 +1726,7 @@ namespace Timeline
                     data.data.Add("sceneInfo", stringWriter.ToString());
                     ExtendedSave.SetSceneExtendedDataById(_extSaveKey, data);
                 }
-                LoopLog("Bake: extended sceneInfo buffer updated OK.");
 #else
-                // HoneySelect / other: SceneWrite still validates serializability
                 using (StringWriter stringWriter = new StringWriter())
                 using (XmlTextWriter xmlWriter = new XmlTextWriter(stringWriter))
                 {
@@ -1737,7 +1734,6 @@ namespace Timeline
                     SceneWrite(null, xmlWriter);
                     xmlWriter.WriteEndElement();
                 }
-                LoopLog("Bake: timeline XML snapshot OK (platform without ExtensibleSaveFormat buffer).");
 #endif
             }
             catch (Exception e)
@@ -1755,7 +1751,6 @@ namespace Timeline
         private void BakeLoopTag(string tag)
         {
             tag = Interpolable.NormalizeTag(tag);
-            LoopLog("======== Bake start tag=[" + tag + "] ========");
             if (tag.Length == 0)
             {
                 LoopLog("Bake aborted: empty tag.");
@@ -1776,22 +1771,21 @@ namespace Timeline
             TagLoopRegion region;
             if (regions.TryGetValue(tag, out region) == false || region.valid == false)
             {
-                LoopLog("Bake aborted: tag has no valid from/to region (" + (region != null ? region.error : "missing") + ").");
+                LoopLog("Bake aborted: tag [" + tag + "] has no valid from/to (" + (region != null ? region.error : "missing") + ").");
                 return;
             }
 
             float D = region.to - region.from;
             if (D <= 1e-8f)
             {
-                LoopLog("Bake aborted: empty loop duration.");
+                LoopLog("Bake aborted: empty loop duration for [" + tag + "].");
                 return;
             }
 
-            // Collect active windows [stat, end] (end exclusive-ish; no end => duration)
             var windows = new List<KeyValuePair<float, float>>();
             if (region.stats.Count == 0)
             {
-                LoopLog("Bake aborted: no loop_stat for tag.");
+                LoopLog("Bake aborted: no loop_stat for [" + tag + "].");
                 return;
             }
             region.stats.Sort();
@@ -1800,10 +1794,7 @@ namespace Timeline
             {
                 float st = region.stats[si];
                 if (st < region.from)
-                {
-                    LoopLog("Bake: skip invalid stat " + st.ToString("0.###") + " (< from).");
                     continue;
-                }
                 float en = _duration;
                 for (int ei = 0; ei < region.ends.Count; ei++)
                 {
@@ -1818,13 +1809,10 @@ namespace Timeline
             }
             if (windows.Count == 0)
             {
-                LoopLog("Bake aborted: no valid stat/end windows.");
+                LoopLog("Bake aborted: no valid stat/end window for [" + tag + "].");
                 return;
             }
-            foreach (var w in windows)
-                LoopLog("Bake window: stat=" + w.Key.ToString("0.###") + " end=" + w.Value.ToString("0.###"));
 
-            // Tracks subscribed to this tag
             var tracks = new List<Interpolable>();
             foreach (Interpolable interp in _interpolables.Values)
             {
@@ -1832,18 +1820,14 @@ namespace Timeline
                     continue;
                 if (interp.HasTag(tag) == false)
                     continue;
-                // conflict check: would multiple tags be active in any window sample?
                 tracks.Add(interp);
             }
-            LoopLog("Bake: subscribed tracks = " + tracks.Count);
 
-            int totalAdded = 0, totalSkipped = 0, tracksBaked = 0, tracksSkippedConflict = 0;
+            int totalAdded = 0, totalSkipped = 0, tracksBaked = 0, tracksSkippedConflict = 0, tracksNoSource = 0;
 
             foreach (Interpolable track in tracks)
             {
                 string trackName = string.IsNullOrEmpty(track.alias) ? track.name : track.alias;
-
-                // Skip if tag conflict possible: other tags also on track that have overlapping active windows
                 bool conflict = false;
                 foreach (string other in track.tags)
                 {
@@ -1853,7 +1837,6 @@ namespace Timeline
                     TagLoopRegion or;
                     if (regions.TryGetValue(o, out or) == false || or.valid == false)
                         continue;
-                    // rough overlap of any windows
                     foreach (var w in windows)
                     {
                         float st;
@@ -1868,12 +1851,10 @@ namespace Timeline
                 }
                 if (conflict)
                 {
-                    LoopLog("Bake SKIP track \"" + trackName + "\": multi-tag conflict risk.");
                     tracksSkippedConflict++;
                     continue;
                 }
 
-                // Source keyframes in [from, to]; at endpoints prefer to then from
                 var source = new List<KeyValuePair<float, Keyframe>>();
                 Keyframe atFrom = null, atTo = null;
                 float fromT = region.from, toT = region.to;
@@ -1888,34 +1869,28 @@ namespace Timeline
                     else if (kf.Key > fromT && kf.Key < toT)
                         source.Add(kf);
                 }
-                // Phase 0 keyframe: to preferred else from
                 Keyframe phase0 = atTo != null ? atTo : atFrom;
                 if (phase0 != null)
                     source.Insert(0, new KeyValuePair<float, Keyframe>(fromT, phase0));
 
                 if (source.Count == 0)
                 {
-                    LoopLog("Bake track \"" + trackName + "\": no source keyframes in [from,to].");
+                    tracksNoSource++;
                     continue;
                 }
 
-                LoopLog("Bake track \"" + trackName + "\": " + source.Count + " source keyframe(s) in loop.");
                 int added = 0, skipped = 0;
-
                 foreach (var w in windows)
                 {
                     float stat = w.Key;
                     float end = w.Value;
                     float maxProgress = IntegrateMainTimeScale(stat, end);
                     float gD = IntegrateInvTimeScaleInRegion(region.from, D, D);
-                    if (gD <= 1e-12f) gD = D;
-                    float maxElapsed = maxProgress;
-                    if (maxElapsed <= 0f)
-                    {
-                        LoopLog("Bake track \"" + trackName + "\": zero integrated scale in window, skip window.");
+                    if (gD <= 1e-12f)
+                        gD = D;
+                    if (maxProgress <= 0f)
                         continue;
-                    }
-                    int maxN = Mathf.FloorToInt(maxElapsed / gD) + 2;
+                    int maxN = Mathf.FloorToInt(maxProgress / gD) + 2;
 
                     foreach (KeyValuePair<float, Keyframe> src in source)
                     {
@@ -1929,7 +1904,7 @@ namespace Timeline
                         for (int n = 0; n <= maxN; n++)
                         {
                             float targetElapsed = gPhase + n * gD;
-                            if (targetElapsed > maxElapsed + BakeTimeEpsilon)
+                            if (targetElapsed > maxProgress + BakeTimeEpsilon)
                                 break;
                             float T;
                             if (TrySolveBakeTime(stat, end, targetElapsed, out T) == false)
@@ -1937,27 +1912,22 @@ namespace Timeline
                             if (T < stat - BakeTimeEpsilon || T > end + BakeTimeEpsilon)
                                 continue;
 
-                            // Snap / existing key check
                             float existing;
                             if (FindNearKeyTime(track, T, BakeTimeEpsilon, out existing))
                             {
                                 skipped++;
-                                LoopLogDebug("Bake skip T=" + T.ToString("0.######") + " (exists " + existing.ToString("0.######") + ")");
                                 continue;
                             }
 
-                            // Copy keyframe
                             AnimationCurve curveCopy = new AnimationCurve(src.Value.curve.keys);
-                            object valueCopy = src.Value.value; // shared immutable-ish values (float/vector/string)
+                            object valueCopy = src.Value.value;
                             Keyframe nk = new Keyframe(valueCopy, track, curveCopy);
                             track.keyframes.Add(T, nk);
                             added++;
-                            LoopLogDebug("Bake add T=" + T.ToString("0.######") + " from phase=" + phase.ToString("0.###") + " n=" + n);
                         }
                     }
                 }
 
-                LoopLog("Bake track \"" + trackName + "\": added=" + added + " skipped(existing)=" + skipped);
                 totalAdded += added;
                 totalSkipped += skipped;
                 if (added > 0)
@@ -1966,8 +1936,13 @@ namespace Timeline
 
             UpdateGrid();
             UpdateInterpolablesView();
-            LoopLog("======== Bake done tag=[" + tag + "] tracks=" + tracksBaked + " addedKeys=" + totalAdded + " skippedKeys=" + totalSkipped + " conflictTracks=" + tracksSkippedConflict + " ========");
-            LoopLog("Bake note: loop config/tags kept for compatibility; ordinary Timeline ignores them.");
+            LoopLog("Bake [" + tag + "] done: tracks " + tracksBaked + "/" + tracks.Count
+                + ", +keys " + totalAdded
+                + ", skipped(existing) " + totalSkipped
+                + ", conflict " + tracksSkippedConflict
+                + ", noSource " + tracksNoSource
+                + ", windows " + windows.Count
+                + ". Loop config kept.");
         }
 
         private bool FindNearKeyTime(Interpolable track, float t, float eps, out float found)
@@ -2892,6 +2867,46 @@ namespace Timeline
                                         }
                                     });
 
+                                    // Select all business tracks that have a given tag
+                                    {
+                                        var selectLeaves = new List<AContextMenuElement>();
+                                        foreach (string t in CollectAllTrackTags())
+                                        {
+                                            string tagCopy = t;
+                                            selectLeaves.Add(new LeafElement()
+                                            {
+                                                text = tagCopy,
+                                                onClick = p =>
+                                                {
+                                                    var matches = new List<Interpolable>();
+                                                    foreach (Interpolable interp in _interpolables.Values)
+                                                    {
+                                                        if (interp.IsLoopConfigTrack())
+                                                            continue;
+                                                        if (interp.HasTag(tagCopy))
+                                                            matches.Add(interp);
+                                                    }
+                                                    if (matches.Count == 0)
+                                                    {
+                                                        LoopLog("Select by tag [" + tagCopy + "]: no tracks found.");
+                                                        return;
+                                                    }
+                                                    SelectInterpolable(matches.ToArray());
+                                                    LoopLog("Selected " + matches.Count + " track(s) with tag [" + tagCopy + "].");
+                                                }
+                                            });
+                                        }
+                                        if (selectLeaves.Count > 0)
+                                        {
+                                            elements.Add(new GroupElement()
+                                            {
+                                                icon = _checkboxCompositeSprite,
+                                                text = "Select Tracks With Tag",
+                                                elements = selectLeaves
+                                            });
+                                        }
+                                    }
+
                                     // Bake loop → real keyframes
                                     {
                                         var bakeLeaves = new List<AContextMenuElement>();
@@ -2903,7 +2918,6 @@ namespace Timeline
                                                 text = tagCopy,
                                                 onClick = p =>
                                                 {
-                                                    LoopLog("UI: user requested Bake Loop for tag [" + tagCopy + "]");
                                                     BakeLoopTag(tagCopy);
                                                 }
                                             });
