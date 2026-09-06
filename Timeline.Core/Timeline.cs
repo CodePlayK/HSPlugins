@@ -3147,29 +3147,44 @@ namespace Timeline
                                             {
                                                 KeyValuePair<float, Keyframe> kPair = display.keyframe.parent.keyframes.First(k => k.Value == display.keyframe);
                                                 SeekPlaybackTime(kPair.Key);
-                                                if (display.keyframe.parent.IsLoopConfigTrack())
-                                                {
-                                                    if (_selectedKeyframes.Count == 0 || _selectedKeyframes.Any(k => k.Value == display.keyframe) == false)
-                                                        SelectKeyframes(kPair);
 
+                                                if (_selectedKeyframes.Count == 0 || _selectedKeyframes.Any(k => k.Value == display.keyframe) == false)
+                                                    SelectKeyframes(kPair);
+
+                                                List<AContextMenuElement> kfElements = new List<AContextMenuElement>();
+                                                bool isLoopCfg = display.keyframe.parent.IsLoopConfigTrack();
+
+                                                if (isLoopCfg == false)
+                                                {
+                                                    kfElements.Add(new LeafElement()
+                                                    {
+                                                        text = "(Tag list only on Loop From/To/Stat/End tracks)",
+                                                        onClick = p => { LoopLog("Right-clicked keyframe on non-loop-config track id=" + display.keyframe.parent.id); }
+                                                    });
+                                                }
+                                                else
+                                                {
                                                     List<string> allTags = CollectAllTrackTags();
-                                                    List<AContextMenuElement> kfElements = new List<AContextMenuElement>();
                                                     if (allTags.Count == 0)
                                                     {
                                                         kfElements.Add(new LeafElement()
                                                         {
-                                                            text = "(No tags — edit tags on a business track first)",
-                                                            onClick = p => { LoopLog("Cannot set keyframe tag: no tags registered on business tracks."); }
+                                                            text = "(No tags — Edit Tags on a business track first)",
+                                                            onClick = p => { LoopLog("Cannot set keyframe tag: no tags on business tracks."); }
                                                         });
                                                     }
                                                     else
                                                     {
+                                                        string current = display.keyframe.value as string ?? "";
                                                         foreach (string t in allTags)
                                                         {
                                                             string tagCopy = t;
+                                                            string label = tagCopy;
+                                                            if (Interpolable.NormalizeTag(current) == tagCopy)
+                                                                label = tagCopy + "  ✓";
                                                             kfElements.Add(new LeafElement()
                                                             {
-                                                                text = tagCopy,
+                                                                text = label,
                                                                 onClick = p =>
                                                                 {
                                                                     foreach (KeyValuePair<float, Keyframe> sel in _selectedKeyframes)
@@ -3177,7 +3192,7 @@ namespace Timeline
                                                                         if (sel.Value.parent.IsLoopConfigTrack())
                                                                             sel.Value.value = tagCopy;
                                                                     }
-                                                                    LoopLog("Keyframe tag set to \"" + tagCopy + "\" at t=" + kPair.Key.ToString("0.###"));
+                                                                    LoopLog("Keyframe tag set to [" + tagCopy + "] at t=" + kPair.Key.ToString("0.###"));
                                                                     UpdateKeyframeWindow(true);
                                                                     UpdateGrid();
                                                                 }
@@ -3199,10 +3214,14 @@ namespace Timeline
                                                             UpdateGrid();
                                                         }
                                                     });
-                                                    Vector2 lp;
-                                                    if (RectTransformUtility.ScreenPointToLocalPointInRectangle((RectTransform)_ui.transform, e.position, e.pressEventCamera, out lp))
-                                                        UIUtility.ShowContextMenu(_ui, lp, kfElements, 220);
                                                 }
+
+                                                Vector2 lp;
+                                                RectTransform uiRt = (RectTransform)_ui.transform;
+                                                if (RectTransformUtility.ScreenPointToLocalPointInRectangle(uiRt, e.position, e.pressEventCamera, out lp) == false)
+                                                    RectTransformUtility.ScreenPointToLocalPointInRectangle(uiRt, e.position, null, out lp);
+                                                UIUtility.ShowContextMenu(_ui, lp, kfElements, 260);
+                                                LoopLogDebug("Keyframe context menu shown (loopCfg=" + isLoopCfg + ", tags=" + CollectAllTrackTags().Count + ")");
                                             }
                                             break;
                                         case PointerEventData.InputButton.Middle:
