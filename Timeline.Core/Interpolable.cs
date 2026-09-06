@@ -1,5 +1,7 @@
 using Studio;
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Xml;
 using UnityEngine;
 
@@ -18,15 +20,10 @@ namespace Timeline
         public string alias = "";
 
         /// <summary>
-        /// Loop group tag (case-insensitive). Empty = not part of any tag loop.
+        /// Loop group tags this track subscribes to (case-insensitive, unique).
+        /// Only business tracks contribute to the global tag list; config tracks do not use this.
         /// </summary>
-        public string tag = "";
-
-        /// <summary>
-        /// Loop speed multiplier for this track when in a tag loop.
-        /// localT = from + ((T - statTime) * loopScale) % (to - from)
-        /// </summary>
-        public float loopScale = 1f;
+        public readonly List<string> tags = new List<string>();
 
         public Interpolable(ObjectCtrlInfo oci, InterpolableModel interpolableModel) : base(interpolableModel.GetParameter(oci), interpolableModel)
         {
@@ -117,6 +114,63 @@ namespace Timeline
             if (string.IsNullOrEmpty(tag))
                 return "";
             return tag.Trim().ToLowerInvariant();
+        }
+
+        public static List<string> ParseTagList(string raw)
+        {
+            var result = new List<string>();
+            if (string.IsNullOrEmpty(raw))
+                return result;
+            foreach (string part in raw.Split(new[] { ',', '，', ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string n = NormalizeTag(part);
+                if (n.Length == 0)
+                    continue;
+                if (result.Contains(n) == false)
+                    result.Add(n);
+            }
+            return result;
+        }
+
+        public static string FormatTagList(IList<string> list)
+        {
+            if (list == null || list.Count == 0)
+                return "";
+            return string.Join(",", list.Select(NormalizeTag).Where(t => t.Length > 0).Distinct().ToArray());
+        }
+
+        public void SetTagsFromString(string raw)
+        {
+            tags.Clear();
+            tags.AddRange(ParseTagList(raw));
+        }
+
+        public bool AddTag(string tag)
+        {
+            string n = NormalizeTag(tag);
+            if (n.Length == 0)
+                return false;
+            if (tags.Contains(n))
+                return false;
+            tags.Add(n);
+            return true;
+        }
+
+        public bool RemoveTag(string tag)
+        {
+            string n = NormalizeTag(tag);
+            return tags.Remove(n);
+        }
+
+        public void ClearTags()
+        {
+            tags.Clear();
+        }
+
+        public bool HasTag(string tag)
+        {
+            string n = NormalizeTag(tag);
+            return n.Length > 0 && tags.Contains(n);
         }
 
         public bool IsLoopConfigTrack()
