@@ -4514,7 +4514,7 @@ namespace Timeline
                 _keyframeValueText.text = "(No tags — Edit Tags on a business track first)";
         }
 
-        private void         private void UpdateCurve()
+        private void UpdateCurve()
         {
             if (_selectedKeyframes.Count == 0)
                 return;
