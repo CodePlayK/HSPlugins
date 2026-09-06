@@ -245,6 +245,11 @@ namespace Timeline
         private readonly List<RawImage> _loopRegionOverlays = new List<RawImage>();
         private readonly Dictionary<string, float> _tagLoopScales = new Dictionary<string, float>();
         private float _lastConflictLogTime = -999f;
+        private Dictionary<string, TagLoopRegion> _cachedTagLoopRegions;
+        private int _tagLoopRegionsCacheFrame = -1;
+        private Interpolable _cachedTimeScaleTrack;
+        private int _timeScaleTrackCacheFrame = -1;
+        private bool _timeScaleTrackIsSimple = true; // no track or effectively constant
         private RectTransform _keyframesContainer;
         private RectTransform _miscContainer;
         private GameObject _keyframePrefab;
@@ -1295,6 +1300,10 @@ namespace Timeline
 
         private Dictionary<string, TagLoopRegion> BuildTagLoopRegions()
         {
+            // Rebuild at most once per frame (Interpolate can hit this many times)
+            if (_cachedTagLoopRegions != null && _tagLoopRegionsCacheFrame == Time.frameCount)
+                return _cachedTagLoopRegions;
+
             var regions = new Dictionary<string, TagLoopRegion>();
             var fromCount = new Dictionary<string, int>();
             var toCount = new Dictionary<string, int>();
@@ -1389,6 +1398,10 @@ namespace Timeline
                 region.valid = true;
             }
 
+            _cachedTagLoopRegions = regions;
+            _tagLoopRegionsCacheFrame = Time.frameCount;
+            // Invalidate timescale track cache same frame scope
+            _timeScaleTrackCacheFrame = -1;
             return regions;
         }
 
@@ -1479,13 +1492,21 @@ namespace Timeline
                 return true;
             }
 
-            // Main axis progress (timeScale along global timeline). When main scale ≡ 1 → (T - stat).
-            float progress = IntegrateMainTimeScale(activeStat[chosen], globalTime);
+            // Cheap path when no variable timeScale track: same as original loop (no per-frame integration)
+            GetTimeScaleTrackCached();
+            float progress;
+            if (_timeScaleTrackIsSimple)
+            {
+                float main = EvaluateMainTimeScaleAt(globalTime);
+                progress = (globalTime - activeStat[chosen]) * main;
+            }
+            else
+            {
+                progress = IntegrateMainTimeScale(activeStat[chosen], globalTime);
+            }
             if (progress < 0f)
                 progress = 0f;
 
-            // Map progress through [from,to] using 1/L density so content matches playing that region
-            // (L = timeScale track inside [from,to], with curves). L≡1 → phase = progress % D.
             float phase = MapProgressThroughLoopRegion(reg.from, D, progress);
             sampleTime = reg.from + phase;
             loopFrom = reg.from;
@@ -1497,12 +1518,48 @@ namespace Timeline
         /// timeScale track value at axis time t (curves respected). No track → 1.
         /// Does not fall back to Unity Time.timeScale (loop content baseline is the track in [from,to]).
         /// </summary>
+        private Interpolable GetTimeScaleTrackCached()
+        {
+            if (_timeScaleTrackCacheFrame == Time.frameCount)
+                return _cachedTimeScaleTrack;
+            _cachedTimeScaleTrack = null;
+            _timeScaleTrackIsSimple = true;
+            foreach (Interpolable interp in _interpolables.Values)
+            {
+                if (interp.enabled && interp.id == "timeScale")
+                {
+                    _cachedTimeScaleTrack = interp;
+                    // Simple if no keys, or single key with value ~1, or all keys ~1
+                    if (interp.keyframes.Count == 0)
+                        _timeScaleTrackIsSimple = true;
+                    else
+                    {
+                        _timeScaleTrackIsSimple = true;
+                        foreach (KeyValuePair<float, Keyframe> kf in interp.keyframes)
+                        {
+                            float v = 1f;
+                            try { v = System.Convert.ToSingle(kf.Value.value); } catch { v = 1f; }
+                            if (Mathf.Abs(v - 1f) > 0.0001f)
+                            {
+                                _timeScaleTrackIsSimple = false;
+                                break;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+            _timeScaleTrackCacheFrame = Time.frameCount;
+            return _cachedTimeScaleTrack;
+        }
+
         private float EvaluateTimeScaleTrackAt(float globalTime)
         {
-            Interpolable tsTrack = FindTimeScaleTrack();
+            Interpolable tsTrack = GetTimeScaleTrackCached();
             if (tsTrack == null || tsTrack.keyframes.Count == 0)
                 return 1f;
 
+            // Manual binary-ish walk: SortedList - sequential is fine for few keys
             KeyValuePair<float, Keyframe> left = default(KeyValuePair<float, Keyframe>);
             KeyValuePair<float, Keyframe> right = default(KeyValuePair<float, Keyframe>);
             foreach (KeyValuePair<float, Keyframe> kf in tsTrack.keyframes)
@@ -1531,13 +1588,9 @@ namespace Timeline
             return Mathf.Max(1e-4f, Mathf.LerpUnclamped(lv, rv, nt));
         }
 
-        /// <summary>
-        /// Main timescale along global axis for progress accumulation.
-        /// Prefer timeScale track; else Unity Time.timeScale (Speed). Paused scrub → 1.
-        /// </summary>
         private float EvaluateMainTimeScaleAt(float globalTime)
         {
-            Interpolable tsTrack = FindTimeScaleTrack();
+            Interpolable tsTrack = GetTimeScaleTrackCached();
             if (tsTrack != null && tsTrack.keyframes.Count > 0)
                 return EvaluateTimeScaleTrackAt(globalTime);
 
@@ -1549,26 +1602,20 @@ namespace Timeline
             return s;
         }
 
-        private Interpolable FindTimeScaleTrack()
-        {
-            foreach (Interpolable interp in _interpolables.Values)
-            {
-                if (interp.enabled && interp.id == "timeScale")
-                    return interp;
-            }
-            return null;
-        }
-
         private float IntegrateMainTimeScale(float a, float b)
         {
             if (b <= a)
                 return 0f;
 
-            Interpolable tsTrack = FindTimeScaleTrack();
-            if (tsTrack == null || tsTrack.keyframes.Count == 0)
-                return EvaluateMainTimeScaleAt(a) * (b - a);
+            // FAST PATH: no variable timeScale track → constant scale
+            Interpolable tsTrack = GetTimeScaleTrackCached();
+            if (tsTrack == null || tsTrack.keyframes.Count == 0 || _timeScaleTrackIsSimple)
+            {
+                float s = EvaluateMainTimeScaleAt(a);
+                return s * (b - a);
+            }
 
-            var points = new List<float>();
+            var points = new List<float>(8);
             points.Add(a);
             points.Add(b);
             foreach (KeyValuePair<float, Keyframe> kf in tsTrack.keyframes)
@@ -1584,7 +1631,7 @@ namespace Timeline
             }
 
             float sum = 0f;
-            const int subSteps = 8;
+            const int subSteps = 4; // was 8 — enough for smooth curves
             for (int i = 0; i < points.Count - 1; i++)
             {
                 float t0 = points[i];
@@ -1597,20 +1644,24 @@ namespace Timeline
                 {
                     float t = t0 + seg * (s / (float)subSteps);
                     float w = (s == 0 || s == subSteps) ? 0.5f : 1f;
-                    acc += w * EvaluateMainTimeScaleAt(t);
+                    acc += w * EvaluateTimeScaleTrackAt(t);
                 }
                 sum += (acc / subSteps) * seg;
             }
             return sum;
         }
 
-        /// <summary>
-        /// G(phase) = ∫_0^phase ds / L(from+s). Invert G(phase) = progress % G(D).
-        /// L from timeScale track inside loop region (curves). L≡1 → phase = progress % D.
-        /// Higher L in region → faster phase advance (matches faster play-through of that region).
-        /// </summary>
         private float MapProgressThroughLoopRegion(float from, float D, float progress)
         {
+            // FAST PATH: uniform L≡1 → phase = progress % D (same as original cheap loop)
+            if (_timeScaleTrackIsSimple || GetTimeScaleTrackCached() == null || GetTimeScaleTrackCached().keyframes.Count == 0)
+            {
+                float phase = progress % D;
+                if (phase < 0f)
+                    phase += D;
+                return phase;
+            }
+
             float gD = IntegrateInvTimeScaleInRegion(from, D, D);
             if (gD <= 1e-12f)
                 return 0f;
@@ -1619,9 +1670,8 @@ namespace Timeline
             if (target < 0f)
                 target += gD;
 
-            // Binary search phase in [0, D]
             float lo = 0f, hi = D;
-            for (int i = 0; i < 40; i++)
+            for (int i = 0; i < 20; i++) // was 40
             {
                 float mid = 0.5f * (lo + hi);
                 float g = IntegrateInvTimeScaleInRegion(from, D, mid);
@@ -1639,13 +1689,16 @@ namespace Timeline
             if (phase <= 1e-12f)
                 return 0f;
 
-            const int steps = 32;
+            // FAST PATH
+            if (_timeScaleTrackIsSimple || GetTimeScaleTrackCached() == null || GetTimeScaleTrackCached().keyframes.Count == 0)
+                return phase;
+
+            const int steps = 12; // was 32
             float sum = 0f;
             for (int s = 0; s <= steps; s++)
             {
                 float p = phase * (s / (float)steps);
-                float u = from + p;
-                float L = EvaluateTimeScaleTrackAt(u);
+                float L = EvaluateTimeScaleTrackAt(from + p);
                 if (L < 1e-4f)
                     L = 1e-4f;
                 float w = (s == 0 || s == steps) ? 0.5f : 1f;
