@@ -1263,6 +1263,12 @@ namespace Timeline
             public readonly List<float> ends = new List<float>();
             public bool valid;
             public string error;
+            /// <summary>True when L≈1 across [from,to] → phase = progress % D.</summary>
+            public bool scaleSimple = true;
+            /// <summary>Cumulative G(phase)=∫_0^phase dθ/L(from+θ). Length = lutSize+1.</summary>
+            public float[] gLut;
+            public float gTotal; // G(D)
+            public int lutSize;
         }
 
         private void LoopLog(string message)
@@ -1396,6 +1402,7 @@ namespace Timeline
                 region.stats.Sort();
                 region.ends.Sort();
                 region.valid = true;
+                BuildRegionScaleLut(region);
             }
 
             _cachedTagLoopRegions = regions;
@@ -1492,32 +1499,39 @@ namespace Timeline
                 return true;
             }
 
-            // Cheap path when no variable timeScale track: same as original loop (no per-frame integration)
-            GetTimeScaleTrackCached();
-            float progress;
-            if (_timeScaleTrackIsSimple)
-            {
-                float main = EvaluateMainTimeScaleAt(globalTime);
-                progress = (globalTime - activeStat[chosen]) * main;
-            }
-            else
-            {
-                progress = IntegrateMainTimeScale(activeStat[chosen], globalTime);
-            }
+            // progress = ∫[stat→T] M(t) dt   (main timescale along axis)
+            // phase from G(phase)=∫ dθ/L = progress % G(D)
+            // ⇒ d(phase)/dT = M(T)*L(phase)  (product of main × loop-local timescale)
+            float progress = GetMainProgressCached(activeStat[chosen], globalTime);
             if (progress < 0f)
                 progress = 0f;
 
-            float phase = MapProgressThroughLoopRegion(reg.from, D, progress);
+            float phase = MapProgressThroughLoopRegion(reg, D, progress);
             sampleTime = reg.from + phase;
             loopFrom = reg.from;
             loopTo = reg.to;
             return true;
         }
 
-        /// <summary>
-        /// timeScale track value at axis time t (curves respected). No track → 1.
-        /// Does not fall back to Unity Time.timeScale (loop content baseline is the track in [from,to]).
-        /// </summary>
+        // Per-frame cache: main progress from stat → current T
+        private float _mainProgressCacheGlobalT = float.NaN;
+        private readonly Dictionary<float, float> _mainProgressFromStat = new Dictionary<float, float>();
+
+        private float GetMainProgressCached(float stat, float globalTime)
+        {
+            if (_mainProgressCacheGlobalT != globalTime)
+            {
+                _mainProgressFromStat.Clear();
+                _mainProgressCacheGlobalT = globalTime;
+            }
+            float p;
+            if (_mainProgressFromStat.TryGetValue(stat, out p))
+                return p;
+            p = IntegrateMainTimeScale(stat, globalTime);
+            _mainProgressFromStat[stat] = p;
+            return p;
+        }
+
         private Interpolable GetTimeScaleTrackCached()
         {
             if (_timeScaleTrackCacheFrame == Time.frameCount)
@@ -1529,7 +1543,6 @@ namespace Timeline
                 if (interp.enabled && interp.id == "timeScale")
                 {
                     _cachedTimeScaleTrack = interp;
-                    // Simple if no keys, or single key with value ~1, or all keys ~1
                     if (interp.keyframes.Count == 0)
                         _timeScaleTrackIsSimple = true;
                     else
@@ -1553,13 +1566,15 @@ namespace Timeline
             return _cachedTimeScaleTrack;
         }
 
+        /// <summary>
+        /// timeScale track at axis time t (with curve). No track → 1.
+        /// </summary>
         private float EvaluateTimeScaleTrackAt(float globalTime)
         {
             Interpolable tsTrack = GetTimeScaleTrackCached();
             if (tsTrack == null || tsTrack.keyframes.Count == 0)
                 return 1f;
 
-            // Manual binary-ish walk: SortedList - sequential is fine for few keys
             KeyValuePair<float, Keyframe> left = default(KeyValuePair<float, Keyframe>);
             KeyValuePair<float, Keyframe> right = default(KeyValuePair<float, Keyframe>);
             foreach (KeyValuePair<float, Keyframe> kf in tsTrack.keyframes)
@@ -1588,6 +1603,9 @@ namespace Timeline
             return Mathf.Max(1e-4f, Mathf.LerpUnclamped(lv, rv, nt));
         }
 
+        /// <summary>
+        /// Main timescale M(t) on global axis (timeScale track, else Unity Time.timeScale / Speed).
+        /// </summary>
         private float EvaluateMainTimeScaleAt(float globalTime)
         {
             Interpolable tsTrack = GetTimeScaleTrackCached();
@@ -1602,20 +1620,20 @@ namespace Timeline
             return s;
         }
 
+        /// <summary>
+        /// ∫_a^b M(t) dt. Fast path when M is constant.
+        /// </summary>
         private float IntegrateMainTimeScale(float a, float b)
         {
             if (b <= a)
                 return 0f;
 
-            // FAST PATH: no variable timeScale track → constant scale
             Interpolable tsTrack = GetTimeScaleTrackCached();
             if (tsTrack == null || tsTrack.keyframes.Count == 0 || _timeScaleTrackIsSimple)
-            {
-                float s = EvaluateMainTimeScaleAt(a);
-                return s * (b - a);
-            }
+                return EvaluateMainTimeScaleAt(a) * (b - a);
 
-            var points = new List<float>(8);
+            // Piecewise over timeScale knots in [a,b] + endpoints; 8 substeps per segment for bake/play accuracy
+            var points = new List<float>(tsTrack.keyframes.Count + 2);
             points.Add(a);
             points.Add(b);
             foreach (KeyValuePair<float, Keyframe> kf in tsTrack.keyframes)
@@ -1631,7 +1649,7 @@ namespace Timeline
             }
 
             float sum = 0f;
-            const int subSteps = 4; // was 8 — enough for smooth curves
+            const int subSteps = 8;
             for (int i = 0; i < points.Count - 1; i++)
             {
                 float t0 = points[i];
@@ -1651,10 +1669,57 @@ namespace Timeline
             return sum;
         }
 
-        private float MapProgressThroughLoopRegion(float from, float D, float progress)
+        /// <summary>
+        /// Precompute G(phase)=∫_0^phase dθ/L for a region. L from timeScale track in [from,to].
+        /// </summary>
+        private void BuildRegionScaleLut(TagLoopRegion region)
         {
-            // FAST PATH: uniform L≡1 → phase = progress % D (same as original cheap loop)
-            if (_timeScaleTrackIsSimple || GetTimeScaleTrackCached() == null || GetTimeScaleTrackCached().keyframes.Count == 0)
+            float D = region.to - region.from;
+            if (D <= 1e-8f)
+            {
+                region.scaleSimple = true;
+                region.gLut = null;
+                region.gTotal = 0f;
+                region.lutSize = 0;
+                return;
+            }
+
+            GetTimeScaleTrackCached();
+            const int n = 128; // resolution of LUT
+            region.lutSize = n;
+            region.gLut = new float[n + 1];
+            region.gLut[0] = 0f;
+            region.scaleSimple = true;
+
+            float dp = D / n;
+            for (int i = 0; i < n; i++)
+            {
+                float p0 = i * dp;
+                float p1 = (i + 1) * dp;
+                float L0 = EvaluateTimeScaleTrackAt(region.from + p0);
+                float L1 = EvaluateTimeScaleTrackAt(region.from + p1);
+                if (L0 < 1e-4f) L0 = 1e-4f;
+                if (L1 < 1e-4f) L1 = 1e-4f;
+                if (Mathf.Abs(L0 - 1f) > 0.0001f || Mathf.Abs(L1 - 1f) > 0.0001f)
+                    region.scaleSimple = false;
+                // trapezoid on 1/L
+                float dG = 0.5f * (1f / L0 + 1f / L1) * dp;
+                region.gLut[i + 1] = region.gLut[i] + dG;
+            }
+            region.gTotal = region.gLut[n];
+            if (region.gTotal <= 1e-12f)
+            {
+                region.scaleSimple = true;
+                region.gTotal = D;
+            }
+        }
+
+        /// <summary>
+        /// Map axis progress → phase in [0,D) using precomputed G LUT (or % D if simple).
+        /// </summary>
+        private float MapProgressThroughLoopRegion(TagLoopRegion reg, float D, float progress)
+        {
+            if (reg.scaleSimple || reg.gLut == null || reg.lutSize <= 0)
             {
                 float phase = progress % D;
                 if (phase < 0f)
@@ -1662,7 +1727,7 @@ namespace Timeline
                 return phase;
             }
 
-            float gD = IntegrateInvTimeScaleInRegion(from, D, D);
+            float gD = reg.gTotal;
             if (gD <= 1e-12f)
                 return 0f;
 
@@ -1670,41 +1735,37 @@ namespace Timeline
             if (target < 0f)
                 target += gD;
 
-            float lo = 0f, hi = D;
-            for (int i = 0; i < 20; i++) // was 40
+            // Binary search on LUT
+            int lo = 0, hi = reg.lutSize;
+            while (lo < hi)
             {
-                float mid = 0.5f * (lo + hi);
-                float g = IntegrateInvTimeScaleInRegion(from, D, mid);
-                if (g < target)
-                    lo = mid;
+                int mid = (lo + hi) >> 1;
+                if (reg.gLut[mid] < target)
+                    lo = mid + 1;
                 else
                     hi = mid;
             }
-            return 0.5f * (lo + hi);
+            int i = Mathf.Clamp(lo, 1, reg.lutSize);
+            float g0 = reg.gLut[i - 1];
+            float g1 = reg.gLut[i];
+            float seg = g1 - g0;
+            float frac = seg <= 1e-12f ? 0f : (target - g0) / seg;
+            float dp = D / reg.lutSize;
+            return ((i - 1) + frac) * dp;
         }
 
-        private float IntegrateInvTimeScaleInRegion(float from, float D, float phase)
+        /// <summary>
+        /// G(phase) via LUT (for bake inverse).
+        /// </summary>
+        private float EvaluateRegionG(TagLoopRegion reg, float D, float phase)
         {
             phase = Mathf.Clamp(phase, 0f, D);
-            if (phase <= 1e-12f)
-                return 0f;
-
-            // FAST PATH
-            if (_timeScaleTrackIsSimple || GetTimeScaleTrackCached() == null || GetTimeScaleTrackCached().keyframes.Count == 0)
+            if (reg.scaleSimple || reg.gLut == null || reg.lutSize <= 0)
                 return phase;
-
-            const int steps = 12; // was 32
-            float sum = 0f;
-            for (int s = 0; s <= steps; s++)
-            {
-                float p = phase * (s / (float)steps);
-                float L = EvaluateTimeScaleTrackAt(from + p);
-                if (L < 1e-4f)
-                    L = 1e-4f;
-                float w = (s == 0 || s == steps) ? 0.5f : 1f;
-                sum += w / L;
-            }
-            return (sum / steps) * phase;
+            float u = phase / D * reg.lutSize;
+            int i = Mathf.Clamp(Mathf.FloorToInt(u), 0, reg.lutSize - 1);
+            float frac = u - i;
+            return Mathf.Lerp(reg.gLut[i], reg.gLut[i + 1], frac);
         }
 
         private const float BakeTimeEpsilon = 1e-4f;
@@ -1869,7 +1930,8 @@ namespace Timeline
                     else if (kf.Key > fromT && kf.Key < toT)
                         source.Add(kf);
                 }
-                Keyframe phase0 = atTo != null ? atTo : atFrom;
+                // Coincident from/to: prefer start (from)
+                Keyframe phase0 = atFrom != null ? atFrom : atTo;
                 if (phase0 != null)
                     source.Insert(0, new KeyValuePair<float, Keyframe>(fromT, phase0));
 
@@ -1879,18 +1941,24 @@ namespace Timeline
                     continue;
                 }
 
-                int added = 0, skipped = 0;
+                int added = 0, overwritten = 0;
                 foreach (var w in windows)
                 {
                     float stat = w.Key;
                     float end = w.Value;
-                    float maxProgress = IntegrateMainTimeScale(stat, end);
-                    float gD = IntegrateInvTimeScaleInRegion(region.from, D, D);
-                    if (gD <= 1e-12f)
-                        gD = D;
-                    if (maxProgress <= 0f)
+                    // One progress LUT per window — O(lutSize) build, O(log) invert (avoids freeze)
+                    float[] tLut;
+                    float[] pLut;
+                    float maxProgress;
+                    BuildMainProgressLut(stat, end, out tLut, out pLut, out maxProgress);
+                    float gD = region.scaleSimple ? D : (region.gTotal > 1e-12f ? region.gTotal : D);
+                    if (maxProgress <= 0f || gD <= 1e-12f)
                         continue;
-                    int maxN = Mathf.FloorToInt(maxProgress / gD) + 2;
+
+                    int maxCycles = Mathf.FloorToInt(maxProgress / gD) + 1;
+                    // Soft safety: still accurate, prevents pathological multi-hour freezes
+                    if (maxCycles > 100000)
+                        maxCycles = 100000;
 
                     foreach (KeyValuePair<float, Keyframe> src in source)
                     {
@@ -1899,38 +1967,42 @@ namespace Timeline
                             phase = 0f;
                         if (phase >= D)
                             phase = phase % D;
-                        float gPhase = IntegrateInvTimeScaleInRegion(region.from, D, phase);
+                        float gPhase = EvaluateRegionG(region, D, phase);
 
-                        for (int n = 0; n <= maxN; n++)
+                        for (int n = 0; n <= maxCycles; n++)
                         {
                             float targetElapsed = gPhase + n * gD;
                             if (targetElapsed > maxProgress + BakeTimeEpsilon)
                                 break;
                             float T;
-                            if (TrySolveBakeTime(stat, end, targetElapsed, out T) == false)
+                            if (InvertMainProgressLut(tLut, pLut, targetElapsed, out T) == false)
                                 continue;
                             if (T < stat - BakeTimeEpsilon || T > end + BakeTimeEpsilon)
                                 continue;
 
-                            float existing;
-                            if (FindNearKeyTime(track, T, BakeTimeEpsilon, out existing))
-                            {
-                                skipped++;
-                                continue;
-                            }
-
                             AnimationCurve curveCopy = new AnimationCurve(src.Value.curve.keys);
                             object valueCopy = src.Value.value;
                             Keyframe nk = new Keyframe(valueCopy, track, curveCopy);
-                            track.keyframes.Add(T, nk);
-                            added++;
+
+                            float existing;
+                            if (FindNearKeyTime(track, T, BakeTimeEpsilon, out existing))
+                            {
+                                track.keyframes.Remove(existing);
+                                track.keyframes.Add(existing, nk);
+                                overwritten++;
+                            }
+                            else
+                            {
+                                track.keyframes.Add(T, nk);
+                                added++;
+                            }
                         }
                     }
                 }
 
                 totalAdded += added;
-                totalSkipped += skipped;
-                if (added > 0)
+                totalSkipped += overwritten; // reused counter: overwritten count in summary
+                if (added > 0 || overwritten > 0)
                     tracksBaked++;
             }
 
@@ -1938,7 +2010,7 @@ namespace Timeline
             UpdateInterpolablesView();
             LoopLog("Bake [" + tag + "] done: tracks " + tracksBaked + "/" + tracks.Count
                 + ", +keys " + totalAdded
-                + ", skipped(existing) " + totalSkipped
+                + ", overwritten " + totalSkipped
                 + ", conflict " + tracksSkippedConflict
                 + ", noSource " + tracksNoSource
                 + ", windows " + windows.Count
@@ -1960,35 +2032,107 @@ namespace Timeline
         }
 
         /// <summary>
-        /// Solve IntegrateMainTimeScale(stat, T) = targetProgress for T in [stat, end].
+        /// Build cumulative main-scale progress LUT on [stat,end] for fast bake invert.
         /// </summary>
-        private bool TrySolveBakeTime(float stat, float end, float targetProgress, out float resultT)
+        private void BuildMainProgressLut(float stat, float end, out float[] tLut, out float[] pLut, out float maxProgress)
         {
-            resultT = stat;
+            const int segments = 256; // accuracy vs speed balance
+            int n = segments;
+            if (end <= stat)
+            {
+                tLut = new float[] { stat };
+                pLut = new float[] { 0f };
+                maxProgress = 0f;
+                return;
+            }
+
+            // Include timeScale knots in range for better accuracy
+            var knots = new List<float>();
+            knots.Add(stat);
+            knots.Add(end);
+            Interpolable ts = GetTimeScaleTrackCached();
+            if (ts != null)
+            {
+                foreach (KeyValuePair<float, Keyframe> kf in ts.keyframes)
+                {
+                    if (kf.Key > stat && kf.Key < end)
+                        knots.Add(kf.Key);
+                }
+            }
+            knots.Sort();
+            for (int i = knots.Count - 1; i > 0; i--)
+            {
+                if (Mathf.Abs(knots[i] - knots[i - 1]) < 1e-7f)
+                    knots.RemoveAt(i);
+            }
+
+            // Uniform densify between knots up to ~segments samples
+            var times = new List<float>();
+            int budget = Mathf.Max(n, knots.Count * 2);
+            for (int k = 0; k < knots.Count - 1; k++)
+            {
+                float a = knots[k];
+                float b = knots[k + 1];
+                int steps = Mathf.Max(1, Mathf.RoundToInt(budget * (b - a) / (end - stat)));
+                if (steps > 64) steps = 64;
+                for (int s = 0; s < steps; s++)
+                    times.Add(a + (b - a) * (s / (float)steps));
+            }
+            times.Add(end);
+            for (int i = times.Count - 1; i > 0; i--)
+            {
+                if (Mathf.Abs(times[i] - times[i - 1]) < 1e-8f)
+                    times.RemoveAt(i);
+            }
+
+            tLut = times.ToArray();
+            pLut = new float[tLut.Length];
+            pLut[0] = 0f;
+            for (int i = 0; i < tLut.Length - 1; i++)
+            {
+                float a = tLut[i];
+                float b = tLut[i + 1];
+                // trapezoid on M
+                float ma = EvaluateMainTimeScaleAt(a);
+                float mb = EvaluateMainTimeScaleAt(b);
+                pLut[i + 1] = pLut[i] + 0.5f * (ma + mb) * (b - a);
+            }
+            maxProgress = pLut[pLut.Length - 1];
+        }
+
+        /// <summary>
+        /// Invert progress LUT: find T such that progress(T) ≈ targetProgress.
+        /// </summary>
+        private bool InvertMainProgressLut(float[] tLut, float[] pLut, float targetProgress, out float resultT)
+        {
+            resultT = tLut[0];
+            if (tLut == null || pLut == null || tLut.Length == 0)
+                return false;
             if (targetProgress < -BakeTimeEpsilon)
                 return false;
             if (targetProgress <= BakeTimeEpsilon)
             {
-                resultT = stat;
+                resultT = tLut[0];
                 return true;
             }
-
-            float lo = stat;
-            float hi = end;
-            float fHi = IntegrateMainTimeScale(stat, hi);
-            if (fHi < targetProgress - BakeTimeEpsilon)
+            if (targetProgress > pLut[pLut.Length - 1] + BakeTimeEpsilon)
                 return false;
 
-            for (int i = 0; i < 48; i++)
+            int lo = 0, hi = pLut.Length - 1;
+            while (lo < hi)
             {
-                float mid = 0.5f * (lo + hi);
-                float fMid = IntegrateMainTimeScale(stat, mid);
-                if (fMid < targetProgress)
-                    lo = mid;
+                int mid = (lo + hi) >> 1;
+                if (pLut[mid] < targetProgress)
+                    lo = mid + 1;
                 else
                     hi = mid;
             }
-            resultT = 0.5f * (lo + hi);
+            int i = Mathf.Clamp(lo, 1, pLut.Length - 1);
+            float p0 = pLut[i - 1];
+            float p1 = pLut[i];
+            float seg = p1 - p0;
+            float frac = seg <= 1e-12f ? 0f : (targetProgress - p0) / seg;
+            resultT = Mathf.Lerp(tLut[i - 1], tLut[i], frac);
             return true;
         }
 
